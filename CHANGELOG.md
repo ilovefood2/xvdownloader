@@ -3,6 +3,16 @@
 All notable changes to X Video Downloader are recorded here. The version here
 matches the `version` field in `manifest.json`.
 
+## [1.3.0] - 2026-06-30
+
+### Added
+- HLS fallback: videos that have no direct MP4 variant (HLS-only, e.g. some
+  long/live videos) are now downloaded by fetching the `.m3u8` playlist,
+  downloading all segments, and merging them locally. X's fragmented-MP4 (CMAF)
+  streams are saved as a playable `.mp4` with no re-encoding; plain MPEG-TS
+  streams are saved as `.ts`. Merging runs in an offscreen document since the
+  service worker cannot create blob URLs.
+
 ## [1.2.0] - 2026-06-30
 
 ### Fixed

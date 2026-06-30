@@ -16,6 +16,10 @@ Click it to save the video as an MP4.
   and downloads it with the `chrome.downloads` API. If nothing was captured, it
   falls back to X's public syndication endpoint
   (`cdn.syndication.twimg.com/tweet-result`).
+- If a video has **no direct MP4** (HLS-only), it fetches the `.m3u8` playlist,
+  downloads every segment, and merges them into a playable file locally (in an
+  offscreen document). X's fragmented-MP4 streams become a real `.mp4` with no
+  re-encoding.
 
 No login, API keys, or third-party servers are involved.
 
@@ -33,6 +37,7 @@ No login, API keys, or third-party servers are involved.
 | `manifest.json` | Extension manifest (MV3) |
 | `src/inject.js` | Reads X's API responses to capture video URLs (page context) |
 | `src/content.js` | Detects videos, renders the hover button |
+| `src/offscreen.html` / `offscreen.js` | Merges HLS segments into a downloadable file |
 | `src/background.js` | Resolves the MP4 URL and triggers the download |
 | `src/styles.css` | Button styling |
 | `icons/` | Toolbar / store icons |

@@ -70,6 +70,30 @@ function bestMp4(variants) {
   return mp4s[0].url;
 }
 
+/** Find the HLS (m3u8) playlist url among a list of variants, if any. */
+function getHls(variants) {
+  const m = variants.find(
+    (v) =>
+      v &&
+      v.url &&
+      (/mpegurl/i.test(v.content_type || v.type || "") ||
+        /\.m3u8(\?|$)/i.test(v.url))
+  );
+  return m ? m.url : null;
+}
+
+/** Pick the best MP4 across video lists, with an HLS playlist as fallback. */
+function pickSource(lists, index) {
+  const chosen = lists[Math.min(index || 0, lists.length - 1)];
+  let mp4 = bestMp4(chosen);
+  for (let i = 0; !mp4 && i < lists.length; i++) mp4 = bestMp4(lists[i]);
+  if (mp4) return { url: mp4, hls: null };
+
+  let hls = getHls(chosen);
+  for (let i = 0; !hls && i < lists.length; i++) hls = getHls(lists[i]);
+  return { url: null, hls: hls || null };
+}
+
 async function resolveVideoUrl(tweetId, index) {
   const token = syndicationToken(tweetId);
   const url =
@@ -96,15 +120,10 @@ async function resolveVideoUrl(tweetId, index) {
   const videos = collectVideos(data);
   if (!videos.length) throw new Error("No video found");
 
-  const chosen = videos[Math.min(index || 0, videos.length - 1)];
-  // Try the matched video first, then any other video in the tweet, so an
-  // HLS-only entry doesn't block a sibling that has an MP4.
-  let mp4 = bestMp4(chosen);
-  for (let i = 0; !mp4 && i < videos.length; i++) mp4 = bestMp4(videos[i]);
-  if (!mp4) throw new Error("Only streaming (HLS) format available");
-
+  const src = pickSource(videos, index);
   return {
-    url: mp4,
+    url: src.url,
+    hls: src.hls,
     text: typeof data.text === "string" ? data.text : "",
     author: (data.user && data.user.screen_name) || "",
   };
@@ -115,12 +134,8 @@ function resolveFromCached(cached, index) {
   const lists = (cached && cached.lists) || [];
   if (!lists.length) throw new Error("No video found");
 
-  const chosen = lists[Math.min(index || 0, lists.length - 1)];
-  let mp4 = bestMp4(chosen);
-  for (let i = 0; !mp4 && i < lists.length; i++) mp4 = bestMp4(lists[i]);
-  if (!mp4) throw new Error("Only streaming (HLS) format available");
-
-  return { url: mp4, text: cached.text || "", author: "" };
+  const src = pickSource(lists, index);
+  return { url: src.url, hls: src.hls, text: cached.text || "", author: "" };
 }
 
 /** Turn arbitrary tweet text into a safe, readable filename fragment. */
@@ -137,7 +152,7 @@ function sanitizeName(s) {
     .trim();
 }
 
-function buildFilename(meta, tweetId) {
+function buildFilename(meta, tweetId, ext) {
   const author = sanitizeName(meta.author);
   let title = sanitizeName(meta.text);
   if (title.length > 80) title = title.slice(0, 80).trim();
@@ -151,7 +166,80 @@ function buildFilename(meta, tweetId) {
 
   // Guard against an over-long path component.
   if (base.length > 150) base = base.slice(0, 150).trim();
-  return `${base}.mp4`;
+  return `${base}.${ext || "mp4"}`;
+}
+
+// --- HLS assembly via an offscreen document -------------------------------
+// Service workers can't create blob URLs, so segment merging happens in an
+// offscreen document (which also gets host-permission CORS for fetches).
+let creatingOffscreen = null;
+
+async function ensureOffscreen() {
+  if (await chrome.offscreen.hasDocument()) return;
+  if (!creatingOffscreen) {
+    creatingOffscreen = chrome.offscreen.createDocument({
+      url: "src/offscreen.html",
+      reasons: ["BLOBS"],
+      justification: "Merge HLS video segments into a downloadable file.",
+    });
+  }
+  try {
+    await creatingOffscreen;
+  } finally {
+    creatingOffscreen = null;
+  }
+}
+
+async function assembleHls(masterUrl) {
+  await ensureOffscreen();
+  const res = await chrome.runtime.sendMessage({
+    type: "XVD_HLS",
+    target: "offscreen",
+    url: masterUrl,
+  });
+  if (!res || !res.ok) throw new Error((res && res.error) || "HLS merge failed");
+  return res; // { ok, blobUrl, ext }
+}
+
+// Revoke blob URLs once their download settles so memory is reclaimed.
+const pendingRevokes = new Map(); // downloadId -> blobUrl
+chrome.downloads.onChanged.addListener((delta) => {
+  if (!delta || !delta.state) return;
+  const state = delta.state.current;
+  if (state !== "complete" && state !== "interrupted") return;
+  const blobUrl = pendingRevokes.get(delta.id);
+  if (!blobUrl) return;
+  pendingRevokes.delete(delta.id);
+  chrome.runtime
+    .sendMessage({ type: "XVD_REVOKE", target: "offscreen", blobUrl })
+    .catch(() => {});
+});
+
+async function startDownload(meta, tweetId) {
+  let url = meta.url;
+  let ext = "mp4";
+  let isBlob = false;
+
+  if (!url) {
+    if (!meta.hls) throw new Error("No downloadable video found");
+    const merged = await assembleHls(meta.hls);
+    url = merged.blobUrl;
+    ext = merged.ext || "mp4";
+    isBlob = true;
+  }
+
+  const filename = buildFilename(meta, tweetId, ext);
+  const id = await new Promise((resolve) =>
+    chrome.downloads.download({ url, filename, saveAs: false }, resolve)
+  );
+  if (id == null) {
+    throw new Error(
+      (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
+        "Download blocked"
+    );
+  }
+  if (isBlob) pendingRevokes.set(id, url);
+  return url;
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -169,12 +257,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       if (!meta.author && msg.author) meta.author = msg.author;
 
-      await chrome.downloads.download({
-        url: meta.url,
-        filename: buildFilename(meta, msg.tweetId),
-        saveAs: false,
-      });
-      sendResponse({ ok: true, url: meta.url });
+      const url = await startDownload(meta, msg.tweetId);
+      sendResponse({ ok: true, url });
     } catch (e) {
       sendResponse({ ok: false, error: (e && e.message) || "Error" });
     }
