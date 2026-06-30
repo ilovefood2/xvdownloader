@@ -59,7 +59,11 @@ async function prepare(msg) {
     if (msg.direct) {
       console.log("[XVD] preparing direct MP4");
       try {
-        result = await downloadDirect(msg.direct, { credentials });
+        result = await downloadDirect(msg.direct, {
+          control,
+          onProgress,
+          credentials,
+        });
       } catch (e) {
         if (!msg.hls) throw e;
         console.log("[XVD] direct MP4 failed, falling back to HLS:", e.message);

@@ -252,8 +252,54 @@ async function assembleWithFfmpeg(media, ctx) {
   return { blob: new Blob([out], { type: "video/mp4" }), ext: "mp4" };
 }
 
+function getResponseSize(response) {
+  const contentLength = parseInt(response.headers.get("content-length") || "0", 10);
+  if (contentLength > 0) return contentLength;
+
+  const contentRange = response.headers.get("content-range") || "";
+  const total = parseInt((contentRange.match(/\/(\d+)$/) || [])[1] || "0", 10);
+  return total > 0 ? total : 0;
+}
+
+async function readBlobWithProgress(response, { control, onProgress } = {}) {
+  const total = getResponseSize(response);
+  const reader = response.body && response.body.getReader && response.body.getReader();
+
+  if (!reader) {
+    const blob = await response.blob();
+    if (onProgress && blob.size) onProgress(blob.size, blob.size);
+    return blob;
+  }
+
+  const parts = [];
+  let done = 0;
+  if (onProgress && total) onProgress(0, total);
+
+  try {
+    while (true) {
+      if (control) await control.gate();
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      parts.push(chunk.value);
+      done += chunk.value.byteLength || chunk.value.length || 0;
+      if (onProgress && total) onProgress(Math.min(done, total), total);
+    }
+  } catch (e) {
+    try {
+      await reader.cancel();
+    } catch (cancelError) {
+      /* ignore */
+    }
+    throw e;
+  }
+
+  if (control) await control.gate();
+  if (onProgress && total) onProgress(total, total);
+  return new Blob(parts, { type: response.headers.get("content-type") || "video/mp4" });
+}
+
 /** Download a direct progressive media file (e.g. an MP4). */
-export async function downloadDirect(url, { credentials } = {}) {
+export async function downloadDirect(url, { credentials, control, onProgress } = {}) {
   const fetchTimed = makeFetchTimed(credentials);
   const r = await fetchTimed(url, 20000);
   if (!r.ok) throw new Error("Video blocked by X (HTTP " + r.status + ")");
@@ -261,7 +307,7 @@ export async function downloadDirect(url, { credentials } = {}) {
   if (/text\/html/i.test(type)) {
     throw new Error("Video blocked by X (got a web page, not a video)");
   }
-  return { blob: await r.blob(), ext: "mp4" };
+  return { blob: await readBlobWithProgress(r, { control, onProgress }), ext: "mp4" };
 }
 
 /** Download + assemble an HLS stream into a single MP4 Blob. */

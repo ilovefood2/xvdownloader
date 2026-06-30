@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.3] - 2026-06-30
+
+### Fixed
+- Direct MP4 downloads now report byte-level percentage progress when the media
+  server provides a file size.
+- Pause, resume, and cancel now also work while a direct MP4 is being fetched,
+  not only during HLS segment downloads.
+
 ## [1.11.2] - 2026-06-30
 
 ### Fixed
