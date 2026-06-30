@@ -497,18 +497,13 @@ async function readBlobWithProgress(response, { control, onProgress } = {}) {
 
 /** Download a direct progressive media file (e.g. an MP4). */
 export async function downloadDirect(url, { credentials, control, onProgress } = {}) {
-  const fetchTimed = makeFetchTimed(credentials);
-  const r = await fetchTimed(url, 20000);
-  if (!r.ok) throw new Error("Video blocked by X (HTTP " + r.status + ")");
-  const type = r.headers.get("content-type") || "";
-  if (/text\/html/i.test(type)) {
-    throw new Error("Video blocked by X (got a web page, not a video)");
-  }
-  return { blob: await readBlobWithProgress(r, { control, onProgress }), ext: "mp4" };
+  // Concurrent Range chunks when supported (fast, throttle-resistant), with an
+  // automatic single-GET fallback for servers that don't honour Range.
+  return { blob: await downloadStream(url, { credentials, control, onProgress }), ext: "mp4" };
 }
 
-const MUX_CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB, matches yt-dlp's default
-const MUX_CHUNK_CONCURRENCY = 5;
+const STREAM_CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB, matches yt-dlp's default
+const STREAM_CHUNK_CONCURRENCY = 5;
 
 // Probe a stream's total size with a tiny range request, and confirm the server
 // honours Range (206) so we can chunk it.
@@ -529,12 +524,13 @@ async function probeStreamSize(url, credentials) {
   if (!response.ok) throw new Error("Stream HTTP " + response.status);
   const contentRange = response.headers.get("content-range") || "";
   const total = parseInt((contentRange.match(/\/(\d+)$/) || [])[1] || "0", 10);
+  const contentType = response.headers.get("content-type") || "";
   try {
     await response.arrayBuffer();
   } catch (e) {
     /* ignore */
   }
-  return { total, chunkable: response.status === 206 && total > 0 };
+  return { total, contentType, chunkable: response.status === 206 && total > 0 };
 }
 
 // Download a single Range chunk into a Uint8Array, with a per-chunk timeout.
@@ -566,8 +562,8 @@ async function fetchRangeChunk(url, credentials, start, end) {
  */
 async function downloadStreamChunked(url, total, { credentials, control, onProgress } = {}) {
   const ranges = [];
-  for (let start = 0; start < total; start += MUX_CHUNK_SIZE) {
-    ranges.push([start, Math.min(start + MUX_CHUNK_SIZE - 1, total - 1)]);
+  for (let start = 0; start < total; start += STREAM_CHUNK_SIZE) {
+    ranges.push([start, Math.min(start + STREAM_CHUNK_SIZE - 1, total - 1)]);
   }
   const parts = new Array(ranges.length);
   let done = 0;
@@ -587,7 +583,7 @@ async function downloadStreamChunked(url, total, { credentials, control, onProgr
   }
 
   const results = await Promise.allSettled(
-    Array.from({ length: Math.min(MUX_CHUNK_CONCURRENCY, ranges.length) }, worker)
+    Array.from({ length: Math.min(STREAM_CHUNK_CONCURRENCY, ranges.length) }, worker)
   );
   if (control && control.canceled) throw new CanceledError();
   const failed = results.find((r) => r.status === "rejected");
@@ -595,16 +591,23 @@ async function downloadStreamChunked(url, total, { credentials, control, onProgr
   return new Blob(parts, { type: "video/mp4" });
 }
 
-// Download a stream as a Blob: chunked Range requests when supported (fast),
-// else a single streamed GET.
+// Download a stream as a Blob: concurrent Range chunks when the server supports
+// them (much faster, and bypasses per-connection rate throttling), else a single
+// streamed GET. Rejects HTML error pages served in place of media.
 async function downloadStream(url, { credentials, control, onProgress } = {}) {
-  const { total, chunkable } = await probeStreamSize(url, credentials);
-  if (chunkable) {
-    return downloadStreamChunked(url, total, { credentials, control, onProgress });
+  const probe = await probeStreamSize(url, credentials);
+  if (/text\/html/i.test(probe.contentType)) {
+    throw new Error("Server returned a web page, not a video");
+  }
+  if (probe.chunkable) {
+    return downloadStreamChunked(url, probe.total, { credentials, control, onProgress });
   }
   const fetchTimed = makeFetchTimed(credentials);
   const response = await fetchTimed(url, 20000);
   if (!response.ok) throw new Error("Stream HTTP " + response.status);
+  if (/text\/html/i.test(response.headers.get("content-type") || "")) {
+    throw new Error("Server returned a web page, not a video");
+  }
   return readBlobWithProgress(response, { control, onProgress });
 }
 

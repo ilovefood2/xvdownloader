@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.11.17] - 2026-06-30
+
+### Changed
+- All direct downloads (X, TikTok, generic, generic MP4, and the YouTube
+  progressive fallback) now use the same concurrent Range-chunk downloader as
+  the YouTube mux path — 10 MB chunks, 5 in parallel — which is much faster and
+  bypasses per-connection rate throttling. Servers that don't support Range fall
+  back automatically to a single streamed GET, and HTML error pages served in
+  place of media are rejected up front.
+
 ## [1.11.16] - 2026-06-30
 
 ### Added
