@@ -260,6 +260,12 @@ function getFfmpeg() {
       console.log("[XVD] ffmpeg: loading core (~31 MB)…");
       const mod = await import(chrome.runtime.getURL("vendor/ffmpeg/index.js"));
       const ff = new mod.FFmpeg();
+      // Keep the tail of ffmpeg's log so a failed exec can report why.
+      ff._xvdLog = [];
+      ff.on("log", ({ message }) => {
+        ff._xvdLog.push(message);
+        if (ff._xvdLog.length > 40) ff._xvdLog.shift();
+      });
       await ff.load({
         coreURL: chrome.runtime.getURL("vendor/ffmpeg/core/ffmpeg-core.js"),
         wasmURL: chrome.runtime.getURL("vendor/ffmpeg/core/ffmpeg-core.wasm"),
@@ -669,24 +675,48 @@ export async function downloadMux(videoUrl, audioUrl, { credentials, control, on
 
   console.log("[XVD] ffmpeg: muxing video + audio…");
   try {
-    // No -movflags +faststart: relocating the moov atom rewrites the whole file
-    // and would double the heap usage, defeating the WORKERFS memory savings. A
-    // moov-at-end MP4 plays fine for a fully-downloaded local file.
-    // Explicitly map video from input 0 and audio from input 1 so ffmpeg can
-    // never silently emit an audio-only file if it mis-detects a stream.
-    await ff.exec([
-      "-i", `${MOUNT}/v.mp4`,
-      "-i", `${MOUNT}/a.m4a`,
-      "-map", "0:v:0",
-      "-map", "1:a:0",
-      "-c", "copy",
-      "mux_out.mp4",
-    ]);
-    const out = await ff.readFile("mux_out.mp4");
-    if (!out || !out.length) throw new Error("ffmpeg produced no output");
+    // Map video from input 0 and audio from input 1 so ffmpeg can never silently
+    // emit an audio-only file. Try MP4 first; if its muxer rejects the codec
+    // combination (some Facebook AV1/VP9 fragmented streams), fall back to
+    // Matroska, which accepts anything — yielding a playable .mkv.
+    const run = async (outName) => {
+      try {
+        await ff.deleteFile(outName);
+      } catch (e) {
+        /* not there yet */
+      }
+      await ff.exec([
+        "-i", `${MOUNT}/v.mp4`,
+        "-i", `${MOUNT}/a.m4a`,
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c", "copy",
+        outName,
+      ]);
+      const data = await ff.readFile(outName);
+      return data && data.length ? data : null;
+    };
+
+    let out = null;
+    let ext = "mp4";
+    try {
+      out = await run("mux_out.mp4");
+    } catch (e) {
+      console.warn("[XVD] ffmpeg mp4 mux failed:", e && e.message, "|", (ff._xvdLog || []).slice(-12).join(" | "));
+    }
+    if (!out) {
+      console.log("[XVD] ffmpeg: retrying mux into mkv…");
+      out = await run("mux_out.mkv");
+      ext = "mkv";
+    }
+    if (!out) {
+      throw new Error("ffmpeg mux failed: " + (ff._xvdLog || []).slice(-12).join(" | "));
+    }
+
     if (onProgress && grandTotal) onProgress(grandTotal, grandTotal);
-    console.log("[XVD] ffmpeg: mux done → mp4");
-    return { blob: new Blob([out], { type: "video/mp4" }), ext: "mp4" };
+    console.log("[XVD] ffmpeg: mux done →", ext);
+    const type = ext === "mkv" ? "video/x-matroska" : "video/mp4";
+    return { blob: new Blob([out], { type }), ext };
   } finally {
     try {
       await ff.unmount(MOUNT);
@@ -700,6 +730,11 @@ export async function downloadMux(videoUrl, audioUrl, { credentials, control, on
     }
     try {
       await ff.deleteFile("mux_out.mp4");
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      await ff.deleteFile("mux_out.mkv");
     } catch (e) {
       /* ignore */
     }

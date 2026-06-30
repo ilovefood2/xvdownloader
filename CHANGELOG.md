@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.28] - 2026-06-30
+
+### Fixed
+- Mux: if the MP4 muxer rejects the codec combination (some Facebook AV1/VP9
+  fragmented streams cause the mux to fail at ~99%), automatically retry into a
+  Matroska (.mkv) container, which accepts AV1/VP9 + AAC — so the download still
+  produces a playable file. Capture ffmpeg's log tail and report it on failure.
+
 ## [1.11.27] - 2026-06-30
 
 ### Added

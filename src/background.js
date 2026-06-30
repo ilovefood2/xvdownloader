@@ -862,6 +862,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         );
         sendResponse({ ok: true, url });
       } catch (e) {
+        console.warn("[XVD] generic download failed:", (e && e.message) || e);
         sendResponse({ ok: false, error: (e && e.message) || "Error" });
       } finally {
         jobs.delete(jobId);
