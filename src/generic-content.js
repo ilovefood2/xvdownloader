@@ -421,25 +421,6 @@
       }
     }
 
-    const fbAll = mediaUrls.mp4.filter((u) => /(^|\.)fbcdn\.net$/i.test(safeHost(u)));
-    const fbSigned = fbAll.filter((u) => /[?&]oh=/.test(u) && /[?&]oe=/.test(u));
-    const diag = {
-      type: "XVD_FB_DIAG",
-      fbAll: fbAll.length,
-      fbSigned: fbSigned.length,
-      mp4Total: mediaUrls.mp4.length,
-      groups: Object.fromEntries(
-        Object.entries(groups).map(([id, g]) => [id, `v${g.video.length}/a${g.audio.length}`])
-      ),
-      targetVid: facebookPageVideoId(),
-    };
-    console.log("[XVD] facebook resolve:", diag);
-    try {
-      chrome.runtime.sendMessage(diag); // mirror to the background console
-    } catch (e) {
-      /* ignore */
-    }
-
     const hasBoth = (g) => g && g.video.length && g.audio.length;
 
     // Prefer the video named in the page URL; else the most-buffered one with

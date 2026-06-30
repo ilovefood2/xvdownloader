@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.11.26] - 2026-06-30
+
+### Changed
+- Removed the temporary Facebook resolver diagnostics. Facebook support stays
+  best-effort: it only works when both the video and audio signed streams happen
+  to be fetched on the main thread. In practice Facebook fetches the audio stream
+  in a media Web Worker that a content script cannot intercept, so the signed
+  audio URL is usually unavailable and the download falls back to "no media
+  found" instead of producing a wrong/partial file.
+
 ## [1.11.24] - 2026-06-30
 
 ### Changed
