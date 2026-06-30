@@ -672,9 +672,13 @@ export async function downloadMux(videoUrl, audioUrl, { credentials, control, on
     // No -movflags +faststart: relocating the moov atom rewrites the whole file
     // and would double the heap usage, defeating the WORKERFS memory savings. A
     // moov-at-end MP4 plays fine for a fully-downloaded local file.
+    // Explicitly map video from input 0 and audio from input 1 so ffmpeg can
+    // never silently emit an audio-only file if it mis-detects a stream.
     await ff.exec([
       "-i", `${MOUNT}/v.mp4`,
       "-i", `${MOUNT}/a.m4a`,
+      "-map", "0:v:0",
+      "-map", "1:a:0",
       "-c", "copy",
       "mux_out.mp4",
     ]);

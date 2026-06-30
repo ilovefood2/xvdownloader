@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.23] - 2026-06-30
+
+### Fixed
+- Mux: explicitly map video from the first input and audio from the second
+  (`-map 0:v:0 -map 1:a:0`) so ffmpeg can never silently produce an audio-only
+  file if it mis-detects a stream (e.g. Facebook's AV1/VP9 video).
+
 ## [1.11.22] - 2026-06-30
 
 ### Fixed
