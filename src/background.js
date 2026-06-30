@@ -810,6 +810,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
+  if (msg && msg.type === "XVD_FB_DIAG") {
+    console.log(
+      "[XVD] facebook resolve: fbcdn=%d signed=%d mp4Total=%d target=%s groups=%o",
+      msg.fbAll,
+      msg.fbSigned,
+      msg.mp4Total,
+      msg.targetVid,
+      msg.groups
+    );
+    return false;
+  }
+
   // Pause/resume/cancel from a button → look up the job and relay to offscreen.
   if (
     msg &&
