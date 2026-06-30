@@ -10,9 +10,14 @@
   const EVENT_NAME = "xvd-generic-media-url";
   const CACHE_ATTR = "xvdGenericMediaUrls";
   const MAX_REMEMBERED_URLS = 120;
+  const mediaUrlPatterns = {
+    mp4: /https?:\/\/[^"'\s<>\\]+?\.mp4(?:\/)?(?:[?#][^"'\s<>\\]*)?(?=["'\s<>\\]|$)/gi,
+    hls: /https?:\/\/[^"'\s<>\\]+?\.m3u8(?:\/)?(?:[?#][^"'\s<>\\]*)?(?=["'\s<>\\]|$)/gi,
+  };
 
   const seenVideos = new WeakSet();
   const mediaUrls = { mp4: [], hls: [] };
+  let staticMediaScanned = false;
   let activeVideo = null;
   let hideTimer = null;
   let lastPointer = { x: 0, y: 0 };
@@ -60,8 +65,8 @@
       const parsed = new URL(url, window.location.href);
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
       const path = parsed.pathname + parsed.search;
-      if (/\.mp4(\?|$)/i.test(path)) return "mp4";
-      if (/\.m3u8(\?|$)/i.test(path)) return "hls";
+      if (/\.mp4(?:[/?#]|$)/i.test(path)) return "mp4";
+      if (/\.m3u8(?:[/?#]|$)/i.test(path)) return "hls";
     } catch {
       return null;
     }
@@ -108,6 +113,58 @@
       .forEach((url) => rememberMediaUrl(url));
   }
 
+  function collectStaticPageMediaUrls() {
+    if (staticMediaScanned) return;
+    staticMediaScanned = true;
+
+    const highPrioritySnippets = [];
+    const lowPrioritySnippets = [];
+
+    collectFromNodes(
+      document.querySelectorAll('a[href], [data-src], [data-url], [data-video], [data-preview]'),
+      lowPrioritySnippets
+    );
+    collectFromNodes(
+      document.querySelectorAll('script:not([src]), meta[content], video[src], source[src]'),
+      highPrioritySnippets
+    );
+
+    // Low-priority page links first, then player config/meta/video sources last
+    // so the selected URL favors the main video over preview clips.
+    for (const raw of [...lowPrioritySnippets, ...highPrioritySnippets]) {
+      collectFromText(raw);
+    }
+  }
+
+  function collectFromNodes(nodes, snippets) {
+    for (const node of nodes) {
+      if (node.tagName === "SCRIPT") {
+        snippets.push(node.textContent || "");
+        continue;
+      }
+
+      for (const attr of ["content", "src", "href", "data-src", "data-url", "data-video", "data-preview"]) {
+        const value = node.getAttribute?.(attr);
+        if (value) snippets.push(value);
+      }
+    }
+  }
+
+  function collectFromText(raw) {
+    const text = String(raw)
+      .replace(/\\u002F/g, "/")
+      .replace(/\\\//g, "/")
+      .replace(/&amp;/g, "&");
+
+    for (const match of text.matchAll(mediaUrlPatterns.mp4)) {
+      rememberMediaUrl(match[0], "mp4");
+    }
+    for (const match of text.matchAll(mediaUrlPatterns.hls)) {
+      rememberMediaUrl(match[0], "hls");
+    }
+    rememberMediaUrl(text);
+  }
+
   function getMediaUrlFromElement(video) {
     const candidates = [
       video.currentSrc,
@@ -124,6 +181,7 @@
   function getLatestMediaUrls(video) {
     collectSnifferCache();
     collectPerformanceMediaUrls();
+    collectStaticPageMediaUrls();
     const elementUrls = getMediaUrlFromElement(video);
 
     return {

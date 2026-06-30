@@ -15,8 +15,8 @@
   const CACHE_ATTR = "xvdGenericMediaUrls";
   const MAX_CACHED_URLS = 80;
   const patterns = {
-    mp4: /https?:\/\/[^"'\s<>\\]+?\.mp4(?:\?[^"'\s<>\\]*)?/gi,
-    hls: /https?:\/\/[^"'\s<>\\]+?\.m3u8(?:\?[^"'\s<>\\]*)?/gi,
+    mp4: /https?:\/\/[^"'\s<>\\]+?\.mp4(?:\/)?(?:[?#][^"'\s<>\\]*)?(?=["'\s<>\\]|$)/gi,
+    hls: /https?:\/\/[^"'\s<>\\]+?\.m3u8(?:\/)?(?:[?#][^"'\s<>\\]*)?(?=["'\s<>\\]|$)/gi,
   };
   const cached = { mp4: [], hls: [] };
 
@@ -28,8 +28,8 @@
       const parsed = new URL(url, window.location.href);
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
       const path = parsed.pathname + parsed.search;
-      if (/\.mp4(\?|$)/i.test(path)) return "mp4";
-      if (/\.m3u8(\?|$)/i.test(path)) return "hls";
+      if (/\.mp4(?:[/?#]|$)/i.test(path)) return "mp4";
+      if (/\.m3u8(?:[/?#]|$)/i.test(path)) return "hls";
     } catch {
       return null;
     }

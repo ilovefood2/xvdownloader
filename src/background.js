@@ -355,8 +355,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg && msg.type === "XVD_GENERIC_DOWNLOAD") {
     (async () => {
-      const direct = isHttpMediaUrl(msg.direct, /\.mp4(\?|$)/i) ? msg.direct : null;
-      const hls = isHttpMediaUrl(msg.hls, /\.m3u8(\?|$)/i) ? msg.hls : null;
+      const direct = isHttpMediaUrl(msg.direct, /\.mp4(?:[/?#]|$)/i) ? msg.direct : null;
+      const hls = isHttpMediaUrl(msg.hls, /\.m3u8(?:[/?#]|$)/i) ? msg.hls : null;
 
       const jobId = ++jobSeq;
       jobs.set(jobId, {

@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.11.1] - 2026-06-30
+
+### Fixed
+- Generic website detection now accepts media URLs with a trailing slash after
+  the extension, such as `.mp4/?token=...`.
+- Generic website detection now scans inline player configuration, which covers
+  sites that place MP4/HLS URLs in page scripts before the player starts a
+  network request.
+
 ## [1.11.0] - 2026-06-30
 
 ### Added
