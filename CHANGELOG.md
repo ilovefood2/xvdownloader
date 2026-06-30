@@ -3,6 +3,13 @@
 All notable changes to X Video Downloader are recorded here. The version here
 matches the `version` field in `manifest.json`.
 
+## [1.8.0] - 2026-06-30
+
+### Added
+- Cancel for in-progress HLS downloads. A ✕ button appears next to the
+  percentage while downloading; clicking it aborts the job, discards the
+  fetched segments, and resets the button.
+
 ## [1.7.0] - 2026-06-30
 
 ### Added

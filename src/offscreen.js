@@ -49,6 +49,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return false;
   }
 
+  if (msg.type === "XVD_CANCEL") {
+    const c = getControl(msg.jobId);
+    c.canceled = true;
+    c.paused = false; // unblock any parked workers so they can bail out
+    c.waiters.splice(0).forEach((resolve) => resolve());
+    sendResponse({ ok: true });
+    return false;
+  }
+
   return false;
 });
 
@@ -56,24 +65,33 @@ function hlsError(e) {
   return (e && e.message) || "HLS merge failed";
 }
 
-// Per-job pause control for in-progress HLS downloads.
-const controls = new Map(); // jobId -> { paused, waiters: [] }
+// Raised in the worker loop when a job is canceled.
+class CanceledError extends Error {
+  constructor() {
+    super("Canceled");
+    this.name = "CanceledError";
+  }
+}
+
+// Per-job control for in-progress HLS downloads.
+const controls = new Map(); // jobId -> { paused, canceled, waiters: [] }
 
 function getControl(jobId) {
   let c = controls.get(jobId);
   if (!c) {
-    c = { paused: false, waiters: [] };
+    c = { paused: false, canceled: false, waiters: [] };
     controls.set(jobId, c);
   }
   return c;
 }
 
-/** Block here while the job is paused; resolve when resumed. */
+/** Block while paused; throw if the job has been canceled. */
 async function waitWhilePaused(jobId) {
   if (jobId == null) return;
   const c = getControl(jobId);
-  if (!c.paused) return;
-  await new Promise((resolve) => c.waiters.push(resolve));
+  if (c.canceled) throw new CanceledError();
+  if (c.paused) await new Promise((resolve) => c.waiters.push(resolve));
+  if (c.canceled) throw new CanceledError();
 }
 
 function resolveUrl(base, ref) {

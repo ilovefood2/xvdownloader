@@ -272,8 +272,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
-  // Pause/resume from a button → look up the job and relay to the offscreen doc.
-  if (msg && (msg.type === "XVD_PAUSE" || msg.type === "XVD_RESUME")) {
+  // Pause/resume/cancel from a button → look up the job and relay to offscreen.
+  if (
+    msg &&
+    (msg.type === "XVD_PAUSE" ||
+      msg.type === "XVD_RESUME" ||
+      msg.type === "XVD_CANCEL")
+  ) {
     for (const [jobId, job] of jobs) {
       if (job.requestId === msg.requestId) {
         chrome.runtime

@@ -93,8 +93,18 @@
       '<path fill="currentColor" d="M5 19a1 1 0 0 1 1-1h12a1 1 0 1 1 0 2H6a1 1 0 0 1-1-1Z"/>' +
       "</svg>" +
       '<span class="xvd-label">Download</span>';
+
+    // Cancel control, shown only while an (HLS) download is in progress.
+    const cancel = document.createElement("button");
+    cancel.className = "xvd-cancel-btn";
+    cancel.type = "button";
+    cancel.title = "Cancel download";
+    cancel.textContent = "✕";
+
     wrap.appendChild(btn);
-    return { wrap, btn };
+    wrap.appendChild(cancel);
+    btn.xvdWrap = wrap;
+    return { wrap, btn, cancel };
   }
 
   // Progress updates (sent from the background while merging HLS) are routed
@@ -117,6 +127,8 @@
     const label = btn.querySelector(".xvd-label");
     if (!label) return;
     if (btn.xvdPct == null) return; // still "Fetching…" (no segments yet)
+    // Reveal pause/cancel affordances once a resumable download is underway.
+    if (btn.xvdWrap) btn.xvdWrap.classList.add("xvd-downloading");
     label.textContent = btn.xvdPaused ? "▶ " + btn.xvdPct + "%" : btn.xvdPct + "%";
   }
 
@@ -133,6 +145,18 @@
     renderProgress(btn);
   }
 
+  // Abort an in-progress download and discard what's been fetched.
+  function cancelDownload(btn) {
+    if (!btn.xvdRequestId) return;
+    btn.xvdCanceled = true;
+    chrome.runtime.sendMessage({
+      type: "XVD_CANCEL",
+      requestId: btn.xvdRequestId,
+    });
+    if (btn.xvdWrap) btn.xvdWrap.classList.remove("xvd-downloading");
+    setButtonState(btn, "idle", "Download");
+  }
+
   async function handleClick(videoEl, btn) {
     if (btn.dataset.state === "busy") return;
 
@@ -147,6 +171,7 @@
     btn.xvdRequestId = requestId;
     btn.xvdPct = null;
     btn.xvdPaused = false;
+    btn.xvdCanceled = false;
     btn.classList.remove("xvd-paused");
     setButtonState(btn, "busy", "Fetching…");
     try {
@@ -162,7 +187,9 @@
             ? { lists: cached.lists, text: cached.text }
             : null,
       });
-      if (res && res.ok) {
+      if (btn.xvdCanceled) {
+        // User aborted; cancelDownload already reset the button.
+      } else if (res && res.ok) {
         setButtonState(btn, "done", "Saved");
         setTimeout(() => setButtonState(btn, "idle", "Download"), 2500);
       } else {
@@ -170,13 +197,16 @@
         setTimeout(() => setButtonState(btn, "idle", "Download"), 3500);
       }
     } catch (e) {
-      setButtonState(btn, "error", "Failed");
-      setTimeout(() => setButtonState(btn, "idle", "Download"), 3500);
+      if (!btn.xvdCanceled) {
+        setButtonState(btn, "error", "Failed");
+        setTimeout(() => setButtonState(btn, "idle", "Download"), 3500);
+      }
     } finally {
       jobButtons.delete(requestId);
       btn.xvdRequestId = null;
       btn.xvdPaused = false;
       btn.classList.remove("xvd-paused");
+      if (btn.xvdWrap) btn.xvdWrap.classList.remove("xvd-downloading");
       btn.title = "Download this video";
     }
   }
@@ -193,7 +223,7 @@
       mount.style.position = "relative";
     }
 
-    const { wrap, btn } = makeButton();
+    const { wrap, btn, cancel } = makeButton();
     setButtonState(btn, "idle", "Download");
     mount.appendChild(wrap);
 
@@ -212,6 +242,12 @@
       // While a download is running, the button acts as pause/resume.
       if (btn.dataset.state === "busy") togglePause(btn);
       else handleClick(videoEl, btn);
+    });
+
+    cancel.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      cancelDownload(btn);
     });
   }
 

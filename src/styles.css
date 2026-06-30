@@ -5,6 +5,9 @@
   top: 10px;
   right: 10px;
   z-index: 2147483646;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   opacity: 0;
   transform: translateY(-4px);
   transition: opacity 0.12s ease, transform 0.12s ease;
@@ -57,6 +60,32 @@
 
 .xvd-download-btn.xvd-error {
   background: #f4212e;
+}
+
+/* Cancel control: hidden until a resumable (HLS) download is in progress. */
+.xvd-cancel-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font: 600 14px/1 "Segoe UI", system-ui, -apple-system, sans-serif;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+  transition: background 0.12s ease;
+}
+
+.xvd-cancel-btn:hover {
+  background: #f4212e;
+}
+
+.xvd-btn-wrap.xvd-downloading .xvd-cancel-btn {
+  display: inline-flex;
 }
 
 /* Paused download: stop the spinner and show the button is clickable. */

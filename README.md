@@ -20,8 +20,8 @@ Click it to save the video as an MP4.
   4K), it fetches the `.m3u8` playlist, downloads every segment, and merges them
   into a playable file locally (in an offscreen document). X's fragmented-MP4
   streams become a real `.mp4` with no re-encoding. The button shows a live
-  **download percentage** while this happens, and you can **click it to
-  pause/resume** the download.
+  **download percentage** while this happens; **click it to pause/resume**, or
+  use the **✕** to cancel.
 
 No login, API keys, or third-party servers are involved.
 
