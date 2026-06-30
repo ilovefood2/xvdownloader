@@ -195,12 +195,18 @@ async function ensureOffscreen() {
 // and get back a blob URL to download. Handles both direct MP4 and HLS.
 async function prepareViaOffscreen(meta) {
   await ensureOffscreen();
-  const res = await chrome.runtime.sendMessage({
+  const ask = chrome.runtime.sendMessage({
     type: "XVD_PREPARE",
     target: "offscreen",
     direct: meta.url || null,
     hls: meta.hls || null,
   });
+  // Safety net: if the offscreen document dies (e.g. out of memory on a huge
+  // stream), don't leave the button spinning forever.
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error("Timed out preparing video")), 8 * 60_000)
+  );
+  const res = await Promise.race([ask, timeout]);
   if (!res || !res.ok) throw new Error((res && res.error) || "Download failed");
   return res; // { ok, blobUrl, ext }
 }

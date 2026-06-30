@@ -3,6 +3,18 @@
 All notable changes to X Video Downloader are recorded here. The version here
 matches the `version` field in `manifest.json`.
 
+## [1.5.1] - 2026-06-30
+
+### Fixed
+- Download could hang on "Fetching…" forever if an HLS playlist or segment
+  request stalled. All fetches now time out, segment download progress is
+  logged to the console, and there is an overall safety-net timeout so the
+  button always resolves to success or a clear error.
+
+### Changed
+- HLS segments are now held as Blobs (browser-managed, possibly disk-backed)
+  instead of in-memory ArrayBuffers, so long / 4K streams don't exhaust memory.
+
 ## [1.5.0] - 2026-06-30
 
 ### Fixed

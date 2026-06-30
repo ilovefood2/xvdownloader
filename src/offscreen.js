@@ -50,16 +50,32 @@ function resolveUrl(base, ref) {
 // plain chrome.downloads request. Host permissions grant the cross-origin read.
 const FETCH_OPTS = { credentials: "include", cache: "no-store" };
 
+// Abort a request if no *response* arrives within `ms`, so a stalled fetch can
+// never hang the download forever. The timer is cleared once headers arrive, so
+// reading a large body is not cut off.
+async function fetchTimed(url, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...FETCH_OPTS, signal: ctrl.signal });
+  } catch (e) {
+    if (e && e.name === "AbortError") throw new Error("Request timed out");
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchText(url) {
-  const r = await fetch(url, FETCH_OPTS);
+  const r = await fetchTimed(url, 20000);
   if (!r.ok) throw new Error("Playlist HTTP " + r.status);
   return r.text();
 }
 
-async function fetchBuffer(url) {
-  const r = await fetch(url, FETCH_OPTS);
+async function fetchSegmentBlob(url) {
+  const r = await fetchTimed(url, 30000);
   if (!r.ok) throw new Error("Segment HTTP " + r.status);
-  return r.arrayBuffer();
+  return r.blob();
 }
 
 /** Decide what to fetch (direct MP4 or HLS) and return a downloadable blob. */
@@ -83,17 +99,15 @@ async function prepare(msg) {
 
 /** Fetch a direct MP4 ourselves so credentials/headers reach X's CDN. */
 async function prepareDirect(url) {
-  const r = await fetch(url, FETCH_OPTS);
+  const r = await fetchTimed(url, 20000);
   if (!r.ok) throw new Error("Video blocked by X (HTTP " + r.status + ")");
   const type = r.headers.get("content-type") || "";
   if (/text\/html/i.test(type)) {
     throw new Error("Video blocked by X (got a web page, not a video)");
   }
-  const buf = await r.arrayBuffer();
-  const blobUrl = URL.createObjectURL(
-    new Blob([buf], { type: "video/mp4" })
-  );
-  return { ok: true, blobUrl, ext: "mp4" };
+  console.log("[XVD] downloading direct MP4 body…");
+  const blob = await r.blob();
+  return { ok: true, blobUrl: URL.createObjectURL(blob), ext: "mp4" };
 }
 
 /** Resolve a master playlist to the highest-bandwidth media playlist. */
@@ -141,6 +155,7 @@ function parseMediaPlaylist(text, baseUrl) {
 }
 
 async function assemble(masterUrl) {
+  console.log("[XVD] HLS: fetching playlist", masterUrl);
   const media = await getMediaPlaylist(masterUrl);
   const { mapUrl, segments, encrypted } = parseMediaPlaylist(
     media.text,
@@ -151,14 +166,21 @@ async function assemble(masterUrl) {
   if (!segments.length) throw new Error("No segments in stream");
 
   const urls = mapUrl ? [mapUrl, ...segments] : segments;
-  const buffers = new Array(urls.length);
+  // Hold each segment as a Blob (browser may back it on disk) rather than
+  // keeping every ArrayBuffer in the JS heap — important for long/4K streams.
+  const parts = new Array(urls.length);
+  console.log("[XVD] HLS: downloading", urls.length, "segments");
 
-  // Fetch segments with bounded concurrency, preserving order.
   let next = 0;
+  let done = 0;
   async function worker() {
     while (next < urls.length) {
       const i = next++;
-      buffers[i] = await fetchBuffer(urls[i]);
+      parts[i] = await fetchSegmentBlob(urls[i]);
+      done++;
+      if (done % 25 === 0 || done === urls.length) {
+        console.log("[XVD] HLS:", done + "/" + urls.length, "segments");
+      }
     }
   }
   const workers = Array.from(
@@ -169,6 +191,7 @@ async function assemble(masterUrl) {
 
   const ext = mapUrl ? "mp4" : "ts";
   const type = ext === "mp4" ? "video/mp4" : "video/mp2t";
-  const blobUrl = URL.createObjectURL(new Blob(buffers, { type }));
+  const blobUrl = URL.createObjectURL(new Blob(parts, { type }));
+  console.log("[XVD] HLS: merge complete →", ext);
   return { ok: true, blobUrl, ext };
 }
