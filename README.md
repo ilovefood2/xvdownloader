@@ -8,11 +8,14 @@ Click it to save the video as an MP4.
 
 - A content script watches the page for `<video>` elements inside tweets and
   overlays a download button that appears on hover.
-- When clicked, it reads the tweet's status id from the DOM and asks the
-  background service worker to resolve the video.
-- The background worker calls X's public syndication endpoint
-  (`cdn.syndication.twimg.com/tweet-result`), picks the **highest-bitrate MP4**
-  variant, and downloads it with the `chrome.downloads` API.
+- A page-context script (`src/inject.js`) reads X's own API responses that the
+  page already loads and caches each tweet's video variants — including direct
+  MP4 URLs. This works for all videos, **including sensitive / age-restricted
+  ones**, because the logged-in page already has the data.
+- When clicked, it picks the **highest-bitrate MP4** from the cached variants
+  and downloads it with the `chrome.downloads` API. If nothing was captured, it
+  falls back to X's public syndication endpoint
+  (`cdn.syndication.twimg.com/tweet-result`).
 
 No login, API keys, or third-party servers are involved.
 
@@ -28,6 +31,7 @@ No login, API keys, or third-party servers are involved.
 | File | Purpose |
 | --- | --- |
 | `manifest.json` | Extension manifest (MV3) |
+| `src/inject.js` | Reads X's API responses to capture video URLs (page context) |
 | `src/content.js` | Detects videos, renders the hover button |
 | `src/background.js` | Resolves the MP4 URL and triggers the download |
 | `src/styles.css` | Button styling |

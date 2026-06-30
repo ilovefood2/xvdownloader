@@ -12,14 +12,41 @@
   const BTN_CLASS = "xvd-download-btn";
   const WRAP_CLASS = "xvd-btn-wrap";
 
-  /** Find the tweet status id that a given video belongs to. */
-  function findTweetId(videoEl) {
+  // Video variants sniffed from X's own API responses (filled by inject.js),
+  // keyed by tweet id: id -> { lists: variants[][], text: string }.
+  const mediaCache = new Map();
+
+  window.addEventListener("message", (ev) => {
+    if (ev.source !== window) return;
+    const data = ev.data;
+    if (!data || data.source !== "XVD_MEDIA" || !data.tweets) return;
+    for (const id in data.tweets) {
+      const incoming = data.tweets[id];
+      const cur = mediaCache.get(id) || { lists: [], text: "" };
+      const seen = new Set(cur.lists.map((l) => l[0] && l[0].url));
+      for (const list of incoming.lists || []) {
+        const key = list[0] && list[0].url;
+        if (key && !seen.has(key)) {
+          seen.add(key);
+          cur.lists.push(list);
+        }
+      }
+      if (incoming.text && !cur.text) cur.text = incoming.text;
+      mediaCache.set(id, cur);
+    }
+  });
+
+  /** Find the tweet status id (and author handle) a given video belongs to. */
+  function findTweetRef(videoEl) {
     let el = videoEl;
     while (el && el !== document.body) {
       const links = el.querySelectorAll('a[href*="/status/"]');
       for (const a of links) {
-        const m = (a.getAttribute("href") || "").match(/\/status\/(\d+)/);
-        if (m) return m[1];
+        const href = a.getAttribute("href") || "";
+        const m = href.match(/^\/([^/]+)\/status\/(\d+)/);
+        if (m) return { author: m[1], id: m[2] };
+        const idOnly = href.match(/\/status\/(\d+)/);
+        if (idOnly) return { author: "", id: idOnly[1] };
       }
       el = el.parentElement;
     }
@@ -73,18 +100,24 @@
   async function handleClick(videoEl, btn) {
     if (btn.dataset.state === "busy") return;
 
-    const tweetId = findTweetId(videoEl);
-    if (!tweetId) {
+    const ref = findTweetRef(videoEl);
+    if (!ref) {
       setButtonState(btn, "error", "No tweet id");
       return;
     }
 
     setButtonState(btn, "busy", "Fetching…");
     try {
+      const cached = mediaCache.get(ref.id);
       const res = await chrome.runtime.sendMessage({
         type: "XVD_DOWNLOAD",
-        tweetId,
+        tweetId: ref.id,
+        author: ref.author,
         index: videoIndex(videoEl),
+        cached:
+          cached && cached.lists.length
+            ? { lists: cached.lists, text: cached.text }
+            : null,
       });
       if (res && res.ok) {
         setButtonState(btn, "done", "Downloading");

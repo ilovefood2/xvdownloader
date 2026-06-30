@@ -3,6 +3,19 @@
 All notable changes to X Video Downloader are recorded here. The version here
 matches the `version` field in `manifest.json`.
 
+## [1.2.0] - 2026-06-30
+
+### Fixed
+- Sensitive / age-restricted videos that the public syndication endpoint
+  refuses (error "Tweet unavailable") now download. The extension reads the
+  video URLs directly from X's own API responses that the logged-in page
+  already loads, entirely within the browser.
+
+### Changed
+- Primary resolution now uses the in-page API responses (works for all videos,
+  including sensitive ones); the syndication endpoint is kept only as a
+  fallback when nothing was captured.
+
 ## [1.1.0] - 2026-06-30
 
 ### Added

@@ -110,6 +110,19 @@ async function resolveVideoUrl(tweetId, index) {
   };
 }
 
+/** Resolve from variants sniffed off X's API by the content script. */
+function resolveFromCached(cached, index) {
+  const lists = (cached && cached.lists) || [];
+  if (!lists.length) throw new Error("No video found");
+
+  const chosen = lists[Math.min(index || 0, lists.length - 1)];
+  let mp4 = bestMp4(chosen);
+  for (let i = 0; !mp4 && i < lists.length; i++) mp4 = bestMp4(lists[i]);
+  if (!mp4) throw new Error("Only streaming (HLS) format available");
+
+  return { url: mp4, text: cached.text || "", author: "" };
+}
+
 /** Turn arbitrary tweet text into a safe, readable filename fragment. */
 function sanitizeName(s) {
   return (s || "")
@@ -146,7 +159,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   (async () => {
     try {
-      const meta = await resolveVideoUrl(msg.tweetId, msg.index);
+      // Prefer variants sniffed from X's own API (works for sensitive tweets);
+      // fall back to the public syndication endpoint when nothing was cached.
+      let meta;
+      if (msg.cached && msg.cached.lists && msg.cached.lists.length) {
+        meta = resolveFromCached(msg.cached, msg.index);
+      } else {
+        meta = await resolveVideoUrl(msg.tweetId, msg.index);
+      }
+      if (!meta.author && msg.author) meta.author = msg.author;
+
       await chrome.downloads.download({
         url: meta.url,
         filename: buildFilename(meta, msg.tweetId),
