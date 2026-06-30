@@ -641,13 +641,15 @@ function pickYouTubeProgressiveMp4(playerResponse) {
   return mp4s[0] || null;
 }
 
-// The video-only stream is muxed with ffmpeg.wasm entirely in memory, so the
-// byte budget — not the resolution — is the real out-of-memory guard. The height
-// cap is just a sane ceiling; the picker takes the highest resolution whose file
-// still fits the budget, so short 1440p/4K clips qualify while long ones step
-// down to 1080p.
-const YT_MAX_MUX_HEIGHT = 2160;
-const YT_MAX_MUX_VIDEO_BYTES = 190 * 1024 * 1024;
+// No resolution cap — take the genuinely highest-quality stream. The only limit
+// is physical: ffmpeg.wasm has a 2 GB heap and a stream-copy mux holds the input
+// plus the output (~2x the file) in it, so a video-only stream beyond ~650 MB
+// cannot be remuxed in-browser regardless of resolution. The picker takes the
+// highest resolution whose file fits that ceiling (true 4K for normal-length
+// videos); only extreme 8K / very long 4K steps down, and the progressive MP4
+// fallback still covers a remux that runs out of memory anyway.
+const YT_MAX_MUX_HEIGHT = 4320;
+const YT_MAX_MUX_VIDEO_BYTES = 650 * 1024 * 1024;
 
 // Pick the best directly-fetchable video-only + audio-only MP4 streams for the
 // offscreen ffmpeg step to merge — this yields far higher quality (up to 4K)

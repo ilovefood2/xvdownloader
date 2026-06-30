@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.11.13] - 2026-06-30
+
+### Changed
+- Removed the YouTube resolution cap — downloads now take the genuinely highest
+  available quality (true 4K where present), not a 1080p ceiling. The only limit
+  is physical: ffmpeg.wasm has a 2 GB heap and a stream-copy mux holds the input
+  plus output in it, so a video stream beyond ~650 MB (extreme 8K / very long
+  4K) steps down to the best resolution that can actually be remuxed in-browser.
+- Reduced the muxer's peak memory (each stream is written into ffmpeg and freed
+  before the next is fetched), so large 4K videos remux without exhausting the
+  heap. The progressive MP4 fallback still covers any remux that runs out of
+  memory.
+
 ## [1.11.12] - 2026-06-30
 
 ### Changed

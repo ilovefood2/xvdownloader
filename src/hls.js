@@ -529,14 +529,22 @@ export async function downloadMux(videoUrl, audioUrl, { credentials, control, on
       ? (done) => onProgress(Math.min(completed + done, grandTotal), grandTotal)
       : undefined;
 
-  const videoBlob = await readBlobWithProgress(videoResponse, { control, onProgress: trackProgress });
+  const ff = await getFfmpeg();
+
+  // Write each stream into ffmpeg's filesystem and drop the JS copy before
+  // fetching the next, so peak memory stays near one stream — not video +
+  // audio + output at once. This is what lets large (4K) videos remux under
+  // ffmpeg.wasm's 2 GB heap.
+  let videoBlob = await readBlobWithProgress(videoResponse, { control, onProgress: trackProgress });
+  await ff.writeFile("mux_v.mp4", new Uint8Array(await videoBlob.arrayBuffer()));
+  videoBlob = null;
   completed = videoTotal;
-  const audioBlob = await readBlobWithProgress(audioResponse, { control, onProgress: trackProgress });
+
+  let audioBlob = await readBlobWithProgress(audioResponse, { control, onProgress: trackProgress });
+  await ff.writeFile("mux_a.m4a", new Uint8Array(await audioBlob.arrayBuffer()));
+  audioBlob = null;
 
   await control?.gate();
-  const ff = await getFfmpeg();
-  await ff.writeFile("mux_v.mp4", new Uint8Array(await videoBlob.arrayBuffer()));
-  await ff.writeFile("mux_a.m4a", new Uint8Array(await audioBlob.arrayBuffer()));
   console.log("[XVD] ffmpeg: muxing video + audio…");
   await ff.exec([
     "-i", "mux_v.mp4",
