@@ -5,7 +5,7 @@
  * Runs at the extension origin, so it can fetch cross-origin media (host
  * permissions) and build blob URLs (which the MV3 service worker cannot).
  */
-import { downloadDirect, downloadHls, DownloadControl } from "./hls.js";
+import { downloadDirect, downloadHls, downloadMux, DownloadControl } from "./hls.js";
 
 const controls = new Map(); // jobId -> DownloadControl
 
@@ -57,7 +57,14 @@ async function prepare(msg) {
 
   try {
     let result;
-    if (msg.direct) {
+    if (msg.mux) {
+      console.log("[XVD] preparing muxed video+audio");
+      result = await downloadMux(msg.mux.videoUrl, msg.mux.audioUrl, {
+        control,
+        onProgress,
+        credentials,
+      });
+    } else if (msg.direct) {
       console.log("[XVD] preparing direct MP4");
       try {
         result = await downloadDirect(msg.direct, {

@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.11.7] - 2026-06-30
+
+### Fixed
+- Fixed YouTube downloads that failed (button showed "Failed") for signed-in
+  users: the resolver now calls the watch page, player API and `googlevideo`
+  CDN anonymously (no cookies). Signed-in web cookies made the Android VR
+  player endpoint reject the request, so no MP4 URL was ever returned.
+- Fixed a bad signature-timestamp match (`"sts":1`) that sent an invalid
+  `signatureTimestamp` to the player API; the real value is now read from the
+  player `base.js`.
+
+### Added
+- Added an adaptive fallback for videos with no progressive MP4: the extension
+  downloads the best video-only + audio-only MP4 streams (up to 1080p) and
+  merges them into a single MP4 with the bundled FFmpeg.
+
 ## [1.11.6] - 2026-06-30
 
 ### Fixed

@@ -203,6 +203,7 @@ async function prepareViaOffscreen(meta, jobId, credentials, options = {}) {
     jobId,
     direct: meta.url || null,
     hls: meta.hls || null,
+    mux: meta.mux || null,
     credentials,
     allowTsFallback: options.allowTsFallback === true,
   });
@@ -253,38 +254,50 @@ async function startDownload(meta, tweetId, jobId) {
 }
 
 async function startGenericDownload(meta, requestedFilename, jobId) {
-  const source = { url: meta.url || null, hls: meta.hls || null };
+  const source = { url: meta.url || null, hls: meta.hls || null, mux: null };
+  // Most sites need cookies for restricted streams; YouTube's signed googlevideo
+  // URLs are issued for an anonymous context and break if cookies are attached.
+  let credentials = "include";
 
   if (meta.youtubeVideoId) {
     try {
       console.log("[XVD] resolving YouTube media", meta.youtubeVideoId);
-      source.url = await resolveYouTubeProgressiveMp4(meta.youtubeVideoId);
+      const resolved = await resolveYouTubeMedia(meta.youtubeVideoId);
+      source.url = resolved.url || null;
+      source.mux = resolved.mux || null;
       source.hls = null;
+      credentials = "omit";
     } catch (e) {
       console.warn("[XVD] YouTube resolver failed:", e.message);
-      if (!source.url && !source.hls) throw e;
+      if (!source.url && !source.hls && !source.mux) throw e;
     }
   }
 
-  if (!source.url && !source.hls) throw new Error("No downloadable video found");
+  if (!source.url && !source.hls && !source.mux) {
+    throw new Error("No downloadable video found");
+  }
 
   console.log("[XVD] preparing generic media", {
-    via: source.hls ? "hls" : "direct",
-    src: source.hls || source.url,
+    via: source.mux ? "mux" : source.hls ? "hls" : "direct",
+    src: source.mux ? source.mux.videoUrl : source.hls || source.url,
   });
 
   let prepared;
   try {
     prepared = await prepareViaOffscreen(
-      { url: source.hls ? null : source.url, hls: source.hls || null },
+      {
+        url: source.hls || source.mux ? null : source.url,
+        hls: source.hls || null,
+        mux: source.mux || null,
+      },
       jobId,
-      "include",
+      credentials,
       { allowTsFallback: true }
     );
   } catch (e) {
     if (!source.hls || !source.url) throw e;
     console.log("[XVD] generic HLS failed, falling back to direct media:", e.message);
-    prepared = await prepareViaOffscreen({ url: source.url, hls: null }, jobId, "include");
+    prepared = await prepareViaOffscreen({ url: source.url, hls: null }, jobId, credentials);
   }
 
   const filename = buildGenericFilename(requestedFilename, prepared.ext);
@@ -432,9 +445,12 @@ function extractYouTubePlayerPath(text) {
 function extractSignatureTimestamp(text) {
   const match =
     text.match(/signatureTimestamp["']?\s*[:=]\s*(\d+)/) ||
-    text.match(/sts["']?\s*[:=]\s*(\d+)/);
+    text.match(/\bsts["']?\s*[:=]\s*(\d+)/);
   const value = parseInt((match && match[1]) || "0", 10);
-  return Number.isFinite(value) && value > 0 ? value : 0;
+  // Real signature timestamps are ~5-digit day counts (e.g. 19800+). Reject
+  // tiny incidental matches like `"sts":1` so we fall back to the player
+  // base.js, which always carries the genuine value.
+  return Number.isFinite(value) && value >= 10000 ? value : 0;
 }
 
 async function fetchYouTubeSignatureTimestamp(watchHtml) {
@@ -446,7 +462,7 @@ async function fetchYouTubeSignatureTimestamp(watchHtml) {
 
   const playerUrl = new URL(playerPath, "https://www.youtube.com").href;
   const response = await fetch(playerUrl, {
-    credentials: "include",
+    credentials: "omit",
     cache: "no-store",
   });
   if (!response.ok) return 0;
@@ -472,7 +488,55 @@ function pickYouTubeProgressiveMp4(playerResponse) {
   return mp4s[0] || null;
 }
 
-async function resolveYouTubeProgressiveMp4(videoId) {
+// The video-only stream is muxed with ffmpeg.wasm entirely in memory, so cap it
+// well clear of the wasm heap limit. A high-bitrate 1080p60 stream of a long
+// video can exceed 250 MB, which reliably triggers an out-of-memory abort.
+const YT_MAX_MUX_HEIGHT = 1080;
+const YT_MAX_MUX_VIDEO_BYTES = 220 * 1024 * 1024;
+
+// When no progressive MP4 exists, fall back to the best directly-fetchable
+// video-only + audio-only MP4 streams so the offscreen ffmpeg step can merge
+// them. Prefer the highest resolution that fits the memory budget, but never
+// fail outright over a missing/oversized stream — fall back to the smallest.
+function pickYouTubeAdaptiveMux(playerResponse) {
+  const formats = playerResponse?.streamingData?.adaptiveFormats || [];
+  const direct = (format) =>
+    format && format.url && !format.signatureCipher && !format.cipher;
+  const bytesOf = (format) => Number(format.contentLength) || 0;
+
+  const videos = formats
+    .filter(
+      (format) =>
+        direct(format) &&
+        /video\/mp4/i.test(format.mimeType || "") &&
+        (Number(format.height) || 0) <= YT_MAX_MUX_HEIGHT
+    )
+    .sort(
+      (a, b) =>
+        (Number(b.height) || 0) - (Number(a.height) || 0) ||
+        (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0)
+    );
+
+  // Best quality within budget; if every stream is over/unknown, take the
+  // smallest known size, else just the lowest resolution.
+  const video =
+    videos.find((f) => bytesOf(f) > 0 && bytesOf(f) <= YT_MAX_MUX_VIDEO_BYTES) ||
+    videos
+      .filter((f) => bytesOf(f) > 0)
+      .sort((a, b) => bytesOf(a) - bytesOf(b))[0] ||
+    videos[videos.length - 1];
+
+  const audio = formats
+    .filter(
+      (format) => direct(format) && /audio\/mp4/i.test(format.mimeType || "")
+    )
+    .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0))[0];
+
+  if (!video || !audio) return null;
+  return { videoUrl: video.url, audioUrl: audio.url };
+}
+
+async function resolveYouTubeMedia(videoId) {
   const id = sanitizeYouTubeVideoId(videoId);
   if (!id) throw new Error("Invalid YouTube video id");
 
@@ -480,8 +544,10 @@ async function resolveYouTubeProgressiveMp4(videoId) {
     "https://www.youtube.com/watch?v=" +
     encodeURIComponent(id) +
     "&bpctr=9999999999&has_verified=1";
+  // Anonymous (no cookies): the ANDROID_VR client expects a fresh visitor
+  // context, and signed-in web cookies make the player endpoint reject it.
   const watchResponse = await fetch(watchUrl, {
-    credentials: "include",
+    credentials: "omit",
     cache: "no-store",
     headers: {
       "Accept-Language": "en-US,en;q=0.9",
@@ -506,7 +572,7 @@ async function resolveYouTubeProgressiveMp4(videoId) {
     "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
     {
       method: "POST",
-      credentials: "include",
+      credentials: "omit",
       cache: "no-store",
       headers,
       body: JSON.stringify({
@@ -537,9 +603,15 @@ async function resolveYouTubeProgressiveMp4(videoId) {
     );
   }
 
-  const best = pickYouTubeProgressiveMp4(data);
-  if (!best) throw new Error("No downloadable YouTube MP4 found");
-  return best.url;
+  // Prefer a single progressive MP4 (no remux, no ffmpeg memory pressure).
+  const progressive = pickYouTubeProgressiveMp4(data);
+  if (progressive) return { url: progressive.url };
+
+  // Otherwise merge the best video-only + audio-only MP4 streams via ffmpeg.
+  const mux = pickYouTubeAdaptiveMux(data);
+  if (mux) return { mux };
+
+  throw new Error("No downloadable YouTube MP4 found");
 }
 
 // Active jobs, so segment-progress from the offscreen doc can be forwarded to

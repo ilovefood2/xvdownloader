@@ -507,6 +507,58 @@ export async function downloadDirect(url, { credentials, control, onProgress } =
   return { blob: await readBlobWithProgress(r, { control, onProgress }), ext: "mp4" };
 }
 
+/**
+ * Download separate video-only + audio-only MP4 streams (e.g. YouTube adaptive
+ * formats) and mux them into a single MP4 with ffmpeg (stream copy, no re-encode).
+ */
+export async function downloadMux(videoUrl, audioUrl, { credentials, control, onProgress } = {}) {
+  const fetchTimed = makeFetchTimed(credentials);
+
+  const videoResponse = await fetchTimed(videoUrl, 20000);
+  if (!videoResponse.ok) throw new Error("Video stream HTTP " + videoResponse.status);
+  const audioResponse = await fetchTimed(audioUrl, 20000);
+  if (!audioResponse.ok) throw new Error("Audio stream HTTP " + audioResponse.status);
+
+  // Combined download progress across both streams, leaving headroom for the mux.
+  const videoTotal = getResponseSize(videoResponse);
+  const audioTotal = getResponseSize(audioResponse);
+  const grandTotal = videoTotal + audioTotal;
+  let completed = 0;
+  const trackProgress =
+    onProgress && grandTotal
+      ? (done) => onProgress(Math.min(completed + done, grandTotal), grandTotal)
+      : undefined;
+
+  const videoBlob = await readBlobWithProgress(videoResponse, { control, onProgress: trackProgress });
+  completed = videoTotal;
+  const audioBlob = await readBlobWithProgress(audioResponse, { control, onProgress: trackProgress });
+
+  await control?.gate();
+  const ff = await getFfmpeg();
+  await ff.writeFile("mux_v.mp4", new Uint8Array(await videoBlob.arrayBuffer()));
+  await ff.writeFile("mux_a.m4a", new Uint8Array(await audioBlob.arrayBuffer()));
+  console.log("[XVD] ffmpeg: muxing video + audio…");
+  await ff.exec([
+    "-i", "mux_v.mp4",
+    "-i", "mux_a.m4a",
+    "-c", "copy",
+    "-movflags", "+faststart",
+    "mux_out.mp4",
+  ]);
+  const out = await ff.readFile("mux_out.mp4");
+  try {
+    await ff.deleteFile("mux_v.mp4");
+    await ff.deleteFile("mux_a.m4a");
+    await ff.deleteFile("mux_out.mp4");
+  } catch (e) {
+    /* ignore cleanup errors */
+  }
+  if (!out || !out.length) throw new Error("ffmpeg produced no output");
+  if (onProgress && grandTotal) onProgress(grandTotal, grandTotal);
+  console.log("[XVD] ffmpeg: mux done → mp4");
+  return { blob: new Blob([out], { type: "video/mp4" }), ext: "mp4" };
+}
+
 /** Download + assemble an HLS stream into a single MP4 Blob. */
 export async function downloadHls(masterUrl, opts = {}) {
   const control = opts.control || new DownloadControl();
