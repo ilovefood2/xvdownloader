@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.29] - 2026-06-30
+
+### Fixed
+- Fixed a `grandTotal is not defined` ReferenceError that crashed every mux
+  (YouTube 4K and Facebook) right after ffmpeg finished, so the muxed file was
+  produced but the download then failed. The mux itself was working all along.
+
 ## [1.11.28] - 2026-06-30
 
 ### Fixed

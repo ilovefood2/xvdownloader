@@ -713,7 +713,7 @@ export async function downloadMux(videoUrl, audioUrl, { credentials, control, on
       throw new Error("ffmpeg mux failed: " + (ff._xvdLog || []).slice(-12).join(" | "));
     }
 
-    if (onProgress && grandTotal) onProgress(grandTotal, grandTotal);
+    if (onProgress) onProgress(1, 1); // mux complete
     console.log("[XVD] ffmpeg: mux done →", ext);
     const type = ext === "mkv" ? "video/x-matroska" : "video/mp4";
     return { blob: new Blob([out], { type }), ext };
