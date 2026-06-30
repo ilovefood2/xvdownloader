@@ -421,22 +421,6 @@
       }
     }
 
-    const fbSigned = mediaUrls.mp4.filter(
-      (u) => /(^|\.)fbcdn\.net$/i.test(safeHost(u)) && /[?&]oh=/.test(u) && /[?&]oe=/.test(u)
-    );
-    try {
-      chrome.runtime.sendMessage({
-        type: "XVD_FB_DIAG",
-        signed: fbSigned.length,
-        groups: Object.fromEntries(
-          Object.entries(groups).map(([id, g]) => [id, `v${g.video.length}/a${g.audio.length}`])
-        ),
-        targetVid: facebookPageVideoId(),
-      });
-    } catch (e) {
-      /* ignore */
-    }
-
     const hasBoth = (g) => g && g.video.length && g.audio.length;
 
     // Prefer the video named in the page URL; else the most-buffered one with

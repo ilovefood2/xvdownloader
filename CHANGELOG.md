@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.11.30] - 2026-06-30
+
+### Changed
+- Facebook downloads now work end to end (video + audio captured via the worker
+  interception, muxed to MP4). Removed the temporary resolver diagnostic logging.
+
 ## [1.11.29] - 2026-06-30
 
 ### Fixed
