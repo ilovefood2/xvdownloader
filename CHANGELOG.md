@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.11.9] - 2026-06-30
+
+### Fixed
+- Fixed generic HLS/MP4 downloads that failed with a 403 on Referer-gated CDNs
+  (e.g. a gated site). The extension now spoofs the page's `Referer`/`Origin`
+  headers for its own download requests via a `declarativeNetRequest` rule,
+  scoped to tab-less extension requests (`tabIds: [-1]`) and the media host so
+  normal browsing and unrelated downloads are unaffected. The rule is added at
+  the start of a download and removed when it finishes.
+
 ## [1.11.8] - 2026-06-30
 
 ### Fixed

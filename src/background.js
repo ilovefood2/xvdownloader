@@ -40,6 +40,86 @@ async function ensureYouTubeOriginRule() {
 }
 ensureYouTubeOriginRule();
 
+// Many generic video CDNs (e.g. Referer-gated HLS sites) reject requests that
+// don't carry the page's Referer/Origin, so an extension fetch gets a 403. We
+// spoof those headers for the duration of a download — scoped to the extension's
+// own tab-less requests (tabIds:[-1]) so normal browsing is never affected, and
+// to the media host so unrelated downloads are untouched.
+const MEDIA_REFERER_RULE_BASE = 5000;
+const MEDIA_REFERER_RULE_SPAN = 2000;
+
+function mediaRefererRuleId(jobId) {
+  return MEDIA_REFERER_RULE_BASE + (Math.abs(jobId) % MEDIA_REFERER_RULE_SPAN);
+}
+
+// Derive the host plus a coarse parent domain (so segments served from a sibling
+// subdomain still match), for use as declarativeNetRequest `requestDomains`.
+function mediaRuleDomains(urls) {
+  const domains = new Set();
+  for (const url of urls) {
+    if (!url) continue;
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      if (!host) continue;
+      domains.add(host);
+      const parts = host.split(".");
+      if (parts.length >= 3) domains.add(parts.slice(-2).join("."));
+    } catch {
+      /* ignore unparseable urls */
+    }
+  }
+  return [...domains];
+}
+
+async function setMediaRefererRule(jobId, pageUrl, urls) {
+  let origin;
+  try {
+    origin = new URL(pageUrl).origin;
+  } catch {
+    return false;
+  }
+  const requestDomains = mediaRuleDomains(urls);
+  if (!requestDomains.length) return false;
+
+  try {
+    const id = mediaRefererRuleId(jobId);
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [id],
+      addRules: [
+        {
+          id,
+          priority: 2,
+          action: {
+            type: "modifyHeaders",
+            requestHeaders: [
+              { header: "referer", operation: "set", value: pageUrl },
+              { header: "origin", operation: "set", value: origin },
+            ],
+          },
+          condition: {
+            tabIds: [-1],
+            requestDomains,
+          },
+        },
+      ],
+    });
+    return true;
+  } catch (e) {
+    console.warn("[XVD] could not set media referer rule:", e.message);
+    return false;
+  }
+}
+
+async function clearMediaRefererRule(jobId) {
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [mediaRefererRuleId(jobId)],
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
 /**
  * Token expected by the syndication endpoint. Derived purely from the tweet id
  * (same algorithm the X web widget uses).
@@ -315,40 +395,51 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
     src: source.mux ? source.mux.videoUrl : source.hls || source.url,
   });
 
-  let prepared;
+  // YouTube uses its own anonymous googlevideo URLs; everything else may be
+  // Referer-gated, so spoof the page Referer/Origin for our fetches.
+  const refererActive =
+    !meta.youtubeVideoId && meta.pageUrl
+      ? await setMediaRefererRule(jobId, meta.pageUrl, [source.hls, source.url])
+      : false;
+
   try {
-    prepared = await prepareViaOffscreen(
-      {
-        url: source.hls || source.mux ? null : source.url,
-        hls: source.hls || null,
-        mux: source.mux || null,
-      },
-      jobId,
-      credentials,
-      { allowTsFallback: true }
-    );
-  } catch (e) {
-    if (!source.hls || !source.url) throw e;
-    console.log("[XVD] generic HLS failed, falling back to direct media:", e.message);
-    prepared = await prepareViaOffscreen({ url: source.url, hls: null }, jobId, credentials);
-  }
+    let prepared;
+    try {
+      prepared = await prepareViaOffscreen(
+        {
+          url: source.hls || source.mux ? null : source.url,
+          hls: source.hls || null,
+          mux: source.mux || null,
+        },
+        jobId,
+        credentials,
+        { allowTsFallback: true }
+      );
+    } catch (e) {
+      if (!source.hls || !source.url) throw e;
+      console.log("[XVD] generic HLS failed, falling back to direct media:", e.message);
+      prepared = await prepareViaOffscreen({ url: source.url, hls: null }, jobId, credentials);
+    }
 
-  const filename = buildGenericFilename(requestedFilename, prepared.ext);
+    const filename = buildGenericFilename(requestedFilename, prepared.ext);
 
-  const id = await new Promise((resolve) =>
-    chrome.downloads.download(
-      { url: prepared.blobUrl, filename, saveAs: false },
-      resolve
-    )
-  );
-  if (id == null) {
-    throw new Error(
-      (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
-        "Download blocked"
+    const id = await new Promise((resolve) =>
+      chrome.downloads.download(
+        { url: prepared.blobUrl, filename, saveAs: false },
+        resolve
+      )
     );
+    if (id == null) {
+      throw new Error(
+        (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
+          "Download blocked"
+      );
+    }
+    pendingRevokes.set(id, prepared.blobUrl);
+    return prepared.blobUrl;
+  } finally {
+    if (refererActive) await clearMediaRefererRule(jobId);
   }
-  pendingRevokes.set(id, prepared.blobUrl);
-  return prepared.blobUrl;
 }
 
 function isHttpMediaUrl(url, extPattern) {
@@ -707,6 +798,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             url: direct,
             hls,
             youtubeVideoId: sanitizeYouTubeVideoId(msg.youtubeVideoId),
+            pageUrl: (sender && sender.url) || msg.pageUrl || null,
           },
           msg.filename,
           jobId
