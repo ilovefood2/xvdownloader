@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.11.22] - 2026-06-30
+
+### Fixed
+- Facebook: fixed downloading audio-only from the wrong video. Three causes: the
+  sniffer URL cache (80) was smaller than Facebook's segment count (120+), so the
+  target video's streams were evicted; the resolver guessed the "most-buffered"
+  video instead of the one in the page URL; and when it couldn't form a
+  video+audio pair it fell through to a stray fbcdn audio segment. Now it targets
+  the page's video_id (watch?v= / /videos/<id>), keeps up to 300 sniffed URLs,
+  and refuses to download a lone fbcdn segment.
+
 ## [1.11.21] - 2026-06-30
 
 ### Fixed

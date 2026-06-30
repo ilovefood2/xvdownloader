@@ -13,7 +13,7 @@
 
   const EVENT_NAME = "xvd-generic-media-url";
   const CACHE_ATTR = "xvdGenericMediaUrls";
-  const MAX_CACHED_URLS = 80;
+  const MAX_CACHED_URLS = 300; // DASH sites (Facebook) fire 100+ segment URLs
   const patterns = {
     mp4: /https?:\/\/[^"'\s<>\\]+?\.mp4(?:\/)?(?:[?#][^"'\s<>\\]*)?(?=["'\s<>\\]|$)/gi,
     hls: /https?:\/\/[^"'\s<>\\]+?\.m3u8(?:\/)?(?:[?#][^"'\s<>\\]*)?(?=["'\s<>\\]|$)/gi,

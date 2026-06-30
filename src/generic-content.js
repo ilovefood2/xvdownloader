@@ -10,7 +10,7 @@
   const WRAP_CLASS = "xvd-generic-wrap";
   const EVENT_NAME = "xvd-generic-media-url";
   const CACHE_ATTR = "xvdGenericMediaUrls";
-  const MAX_REMEMBERED_URLS = 120;
+  const MAX_REMEMBERED_URLS = 300; // DASH sites (Facebook) fire 100+ segment URLs
   const mediaUrlPatterns = {
     mp4: /https?:\/\/[^"'\s<>\\]+?\.mp4(?:\/)?(?:[?#][^"'\s<>\\]*)?(?=["'\s<>\\]|$)/gi,
     hls: /https?:\/\/[^"'\s<>\\]+?\.m3u8(?:\/)?(?:[?#][^"'\s<>\\]*)?(?=["'\s<>\\]|$)/gi,
@@ -389,6 +389,13 @@
     }
   }
 
+  function facebookPageVideoId() {
+    const v = new URLSearchParams(window.location.search).get("v");
+    if (v && /^\d+$/.test(v)) return v;
+    const m = window.location.pathname.match(/\/(?:videos|reel|watch)\/(\d+)/);
+    return m && m[1] ? m[1] : null;
+  }
+
   function resolveFacebookMedia() {
     const host = window.location.hostname.toLowerCase();
     if (!/(^|\.)facebook\.com$/.test(host)) return null;
@@ -414,13 +421,21 @@
       }
     }
 
-    // The main video has the most fetched segments and both stream types.
+    const hasBoth = (g) => g && g.video.length && g.audio.length;
+
+    // Prefer the video named in the page URL; else the most-buffered one with
+    // both streams (right on a single-video page, a guess on a busy feed).
     let best = null;
-    for (const id of Object.keys(groups)) {
-      const g = groups[id];
-      if (!g.video.length || !g.audio.length) continue;
-      const score = g.video.length + g.audio.length;
-      if (!best || score > best.score) best = { ...g, score };
+    const targetId = facebookPageVideoId();
+    if (targetId && hasBoth(groups[targetId])) {
+      best = groups[targetId];
+    } else {
+      for (const id of Object.keys(groups)) {
+        const g = groups[id];
+        if (!hasBoth(g)) continue;
+        const score = g.video.length + g.audio.length;
+        if (!best || score > best.score) best = { ...g, score };
+      }
     }
     if (!best) return null;
 
@@ -574,6 +589,11 @@
         mux = facebook;
         direct = null;
         hls = null;
+      } else if (/(^|\.)facebook\.com$/.test(window.location.hostname)) {
+        // Don't fall through to a stray fbcdn segment (a single audio/video
+        // stream from whatever last buffered) — that downloads the wrong,
+        // audio-only file. Make the user play the target video instead.
+        if (direct && /fbcdn\.net/i.test(direct)) direct = null;
       }
     } catch (e) {
       /* fall through */
