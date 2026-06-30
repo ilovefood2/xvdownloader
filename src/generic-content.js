@@ -318,6 +318,8 @@
     collectSnifferCache();
     collectPerformanceMediaUrls();
     collectStaticPageMediaUrls();
+    const tiktok = getTikTokMediaUrl();
+    if (tiktok) rememberMediaUrl(tiktok, "mp4");
     const elementUrls = getMediaUrlFromElement(video);
     const hls = elementUrls.hls || mediaUrls.hls[mediaUrls.hls.length - 1] || null;
     const direct = elementUrls.direct || mediaUrls.mp4[mediaUrls.mp4.length - 1] || null;
@@ -356,6 +358,43 @@
     }
 
     return cleaned;
+  }
+
+  // TikTok embeds the (no-watermark) MP4 URL in a page JSON blob rather than a
+  // <video src>, and the URL has no .mp4 extension, so generic sniffing misses
+  // it. Read it directly and pick the highest-bitrate variant.
+  function getTikTokMediaUrl() {
+    const host = window.location.hostname.toLowerCase();
+    if (!/(^|\.)tiktok\.com$/.test(host)) return null;
+
+    try {
+      const el = document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__");
+      if (!el || !el.textContent) return null;
+
+      const data = JSON.parse(el.textContent);
+      const video =
+        data?.__DEFAULT_SCOPE__?.["webapp.video-detail"]?.itemInfo?.itemStruct?.video;
+      if (!video) return null;
+
+      // The /aweme/v1/play fallback URL returns 403; only the CDN hosts work.
+      const usable = (url) =>
+        typeof url === "string" &&
+        /^https?:\/\//.test(url) &&
+        !/\/aweme\/v1\/play\b/i.test(url);
+
+      // Highest-bitrate variant first; within each, the first usable CDN URL.
+      const variants = (video.bitrateInfo || [])
+        .slice()
+        .sort((a, b) => (Number(b?.Bitrate) || 0) - (Number(a?.Bitrate) || 0));
+      for (const variant of variants) {
+        const url = (variant?.PlayAddr?.UrlList || []).find(usable);
+        if (url) return url;
+      }
+
+      return usable(video.playAddr) ? video.playAddr : null;
+    } catch {
+      return null;
+    }
   }
 
   function getYouTubeVideoId() {

@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.11.11] - 2026-06-30
+
+### Added
+- Added TikTok support. TikTok serves the (no-watermark) MP4 from signed CDN
+  URLs embedded in the page's `__UNIVERSAL_DATA_FOR_REHYDRATION__` JSON, with no
+  `.mp4` extension, so generic sniffing missed it. The extension now reads that
+  JSON, picks the highest-bitrate CDN URL (skipping the `/aweme/v1/play`
+  fallback that 403s), and downloads it with the page cookies + Referer.
+
+### Fixed
+- The Referer-spoof rule now *removes* the `Origin` header instead of setting
+  it. Several CDNs (TikTok, YouTube) return 403 to any request carrying an
+  Origin, and Chrome forces a `chrome-extension://` Origin onto extension
+  fetches; native players send none for media. This also covers the previous
+  YouTube/a gated site cases.
+
 ## [1.11.10] - 2026-06-30
 
 ### Fixed

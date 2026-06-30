@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "X Video Downloader",
-  "version": "1.11.10",
+  "version": "1.11.11",
   "description": "Hover over videos on x.com and other websites to download MP4 or HLS media.",
   "permissions": ["downloads", "offscreen", "declarativeNetRequestWithHostAccess"],
   "content_security_policy": {

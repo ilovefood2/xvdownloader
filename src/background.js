@@ -72,9 +72,8 @@ function mediaRuleDomains(urls) {
 }
 
 async function setMediaRefererRule(jobId, pageUrl, urls) {
-  let origin;
   try {
-    origin = new URL(pageUrl).origin;
+    new URL(pageUrl); // validate
   } catch {
     return false;
   }
@@ -91,9 +90,13 @@ async function setMediaRefererRule(jobId, pageUrl, urls) {
           priority: 2,
           action: {
             type: "modifyHeaders",
+            // Set the page Referer, and REMOVE the Origin header entirely.
+            // Chrome forces an `Origin: chrome-extension://<id>` onto our
+            // fetches, and many media CDNs (TikTok, YouTube) return 403 to any
+            // request carrying an Origin — native players send none for media.
             requestHeaders: [
               { header: "referer", operation: "set", value: pageUrl },
-              { header: "origin", operation: "set", value: origin },
+              { header: "origin", operation: "remove" },
             ],
           },
           condition: {
@@ -466,11 +469,26 @@ function isHttpMp4Url(url) {
     return (
       (parsed.protocol === "https:" || parsed.protocol === "http:") &&
       (/\.mp4(?:[/?#]|$)/i.test(parsed.pathname + parsed.search) ||
-        isYouTubeProgressiveMp4(parsed))
+        isYouTubeProgressiveMp4(parsed) ||
+        isTikTokMediaUrl(parsed))
     );
   } catch {
     return false;
   }
+}
+
+// TikTok serves MP4s from signed CDN URLs that carry no `.mp4` extension, so
+// accept its known media hosts explicitly (the content script extracts the URL
+// from the page's embedded JSON). Excludes the tiktok.com page host itself.
+function isTikTokMediaUrl(parsed) {
+  const host = parsed.hostname.toLowerCase();
+  const isTikTokCdn =
+    /(^|\.)tiktokcdn(-us|-eu)?\.com$/.test(host) ||
+    /(^|\.)tiktokv\.com$/.test(host) ||
+    /(^|\.)muscdn\.com$/.test(host) ||
+    /(^|\.)byteoversea\.com$/.test(host) ||
+    (/(^|\.)tiktok\.com$/.test(host) && host !== "tiktok.com" && host !== "www.tiktok.com");
+  return isTikTokCdn && /\/(video|tos|aweme|obj)\//i.test(parsed.pathname);
 }
 
 function isYouTubeProgressiveMp4(parsed) {
