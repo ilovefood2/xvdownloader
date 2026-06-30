@@ -255,11 +255,23 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
   if (!meta.url && !meta.hls) throw new Error("No downloadable video found");
 
   console.log("[XVD] preparing generic media", {
-    via: meta.url ? "direct" : "hls",
-    src: meta.url || meta.hls,
+    via: meta.hls ? "hls" : "direct",
+    src: meta.hls || meta.url,
   });
 
-  const prepared = await prepareViaOffscreen(meta, jobId, "include");
+  let prepared;
+  try {
+    prepared = await prepareViaOffscreen(
+      { url: meta.hls ? null : meta.url, hls: meta.hls || null },
+      jobId,
+      "include"
+    );
+  } catch (e) {
+    if (!meta.hls || !meta.url) throw e;
+    console.log("[XVD] generic HLS failed, falling back to direct media:", e.message);
+    prepared = await prepareViaOffscreen({ url: meta.url, hls: null }, jobId, "include");
+  }
+
   const filename = buildGenericFilename(requestedFilename, prepared.ext);
 
   const id = await new Promise((resolve) =>
@@ -287,6 +299,24 @@ function isHttpMediaUrl(url, extPattern) {
     return (
       (parsed.protocol === "https:" || parsed.protocol === "http:") &&
       extPattern.test(parsed.pathname + parsed.search)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isHttpHlsUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  if (url.startsWith("blob:") || url.startsWith("data:")) return false;
+
+  try {
+    const parsed = new URL(url);
+    return (
+      (parsed.protocol === "https:" || parsed.protocol === "http:") &&
+      (/\.m3u8(?:[/?#]|$)/i.test(parsed.pathname + parsed.search) ||
+        /(?:^|\/)(?:master)?playlist(?:\/|$)/i.test(parsed.pathname) ||
+        /(?:^|\/)hls(?:\/|$)/i.test(parsed.pathname) ||
+        /(?:^|\/)m3u8(?:\/|$)/i.test(parsed.pathname))
     );
   } catch {
     return false;
@@ -356,7 +386,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === "XVD_GENERIC_DOWNLOAD") {
     (async () => {
       const direct = isHttpMediaUrl(msg.direct, /\.mp4(?:[/?#]|$)/i) ? msg.direct : null;
-      const hls = isHttpMediaUrl(msg.hls, /\.m3u8(?:[/?#]|$)/i) ? msg.hls : null;
+      const hls = isHttpHlsUrl(msg.hls) ? msg.hls : null;
 
       const jobId = ++jobSeq;
       jobs.set(jobId, {

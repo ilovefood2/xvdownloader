@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.11.2] - 2026-06-30
+
+### Fixed
+- Generic website downloads now show pause/resume/cancel controls while a
+  download is running.
+- Generic HLS detection now recognizes playlist responses and playlist-style
+  endpoints that do not end in `.m3u8`, such as `/api/video/MasterPlayList`.
+- Generic downloads now prefer detected HLS playlists over tiny direct loading
+  or ad media files when both are present.
+- The generic sniffer no longer scans downloaded JavaScript bundles for media
+  URLs, avoiding false positives from test URLs embedded in site code.
+
 ## [1.11.1] - 2026-06-30
 
 ### Fixed

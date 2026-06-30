@@ -7,6 +7,7 @@
   "use strict";
 
   const BUTTON_CLASS = "xvd-generic-button";
+  const WRAP_CLASS = "xvd-generic-wrap";
   const EVENT_NAME = "xvd-generic-media-url";
   const CACHE_ATTR = "xvdGenericMediaUrls";
   const MAX_REMEMBERED_URLS = 120;
@@ -25,6 +26,10 @@
   let activeRequestId = null;
   let paused = false;
   let lastProgress = null;
+  let downloadCanceled = false;
+
+  const wrap = document.createElement("div");
+  wrap.className = WRAP_CLASS;
 
   const button = document.createElement("button");
   button.type = "button";
@@ -44,6 +49,20 @@
     }
   });
 
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.className = "xvd-generic-cancel-button";
+  cancelButton.textContent = "×";
+  cancelButton.title = "Cancel download";
+  cancelButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelDownload();
+  });
+
+  wrap.appendChild(button);
+  wrap.appendChild(cancelButton);
+
   chrome.runtime.onMessage.addListener((msg) => {
     if (!msg || msg.type !== "XVD_PROGRESS" || msg.requestId !== activeRequestId) return;
     if (!msg.total) return;
@@ -52,8 +71,8 @@
   });
 
   function ensureButton() {
-    if (!button.isConnected && document.body) {
-      document.body.appendChild(button);
+    if (!wrap.isConnected && document.body) {
+      document.body.appendChild(wrap);
     }
   }
 
@@ -67,11 +86,21 @@
       const path = parsed.pathname + parsed.search;
       if (/\.mp4(?:[/?#]|$)/i.test(path)) return "mp4";
       if (/\.m3u8(?:[/?#]|$)/i.test(path)) return "hls";
+      if (isLikelyHlsEndpoint(parsed)) return "hls";
     } catch {
       return null;
     }
 
     return null;
+  }
+
+  function isLikelyHlsEndpoint(parsed) {
+    const path = parsed.pathname.toLowerCase();
+    return (
+      /(?:^|\/)(?:master)?playlist(?:\/|$)/i.test(path) ||
+      /(?:^|\/)hls(?:\/|$)/i.test(path) ||
+      /(?:^|\/)m3u8(?:\/|$)/i.test(path)
+    );
   }
 
   function rememberMediaUrl(url, forcedKind) {
@@ -183,10 +212,12 @@
     collectPerformanceMediaUrls();
     collectStaticPageMediaUrls();
     const elementUrls = getMediaUrlFromElement(video);
+    const hls = elementUrls.hls || mediaUrls.hls[mediaUrls.hls.length - 1] || null;
+    const direct = elementUrls.direct || mediaUrls.mp4[mediaUrls.mp4.length - 1] || null;
 
     return {
-      direct: elementUrls.direct || mediaUrls.mp4[mediaUrls.mp4.length - 1] || null,
-      hls: elementUrls.hls || mediaUrls.hls[mediaUrls.hls.length - 1] || null,
+      direct: hls ? null : direct,
+      hls,
     };
   }
 
@@ -219,18 +250,22 @@
     }
 
     activeRequestId = `xvd-generic-${++requestSeq}-${Date.now()}`;
+    const requestId = activeRequestId;
     paused = false;
     lastProgress = null;
+    downloadCanceled = false;
     setButtonState("busy", "Fetching...");
 
     try {
       const response = await chrome.runtime.sendMessage({
         type: "XVD_GENERIC_DOWNLOAD",
-        requestId: activeRequestId,
+        requestId,
         direct,
         hls,
         filename: getDownloadFilename(video),
       });
+
+      if (downloadCanceled || activeRequestId !== requestId) return;
 
       if (!response?.ok) {
         throw new Error(response?.error || "Download failed");
@@ -239,6 +274,7 @@
       activeRequestId = null;
       showTemporaryState("Saved", "done", 2200);
     } catch (error) {
+      if (downloadCanceled || activeRequestId !== requestId) return;
       console.warn("[X Video Downloader generic]", error);
       activeRequestId = null;
       showTemporaryState("Failed", "error", 3000);
@@ -246,7 +282,7 @@
   }
 
   function togglePause() {
-    if (!activeRequestId || lastProgress == null) return;
+    if (!activeRequestId) return;
     paused = !paused;
     chrome.runtime.sendMessage({
       type: paused ? "XVD_PAUSE" : "XVD_RESUME",
@@ -256,9 +292,28 @@
   }
 
   function renderProgress() {
-    if (lastProgress == null) return;
+    if (lastProgress == null) {
+      button.textContent = paused ? "Resume" : "Fetching...";
+      button.title = paused ? "Resume download" : "Pause download";
+      return;
+    }
+
     button.textContent = paused ? `Resume ${lastProgress}%` : `${lastProgress}%`;
     button.title = paused ? "Resume download" : "Pause download";
+  }
+
+  function cancelDownload() {
+    if (!activeRequestId) return;
+
+    downloadCanceled = true;
+    chrome.runtime.sendMessage({
+      type: "XVD_CANCEL",
+      requestId: activeRequestId,
+    });
+    activeRequestId = null;
+    paused = false;
+    lastProgress = null;
+    showTemporaryState("Canceled", "error", 1600);
   }
 
   function setButtonState(state, text) {
@@ -268,7 +323,8 @@
     button.classList.toggle("xvd-generic-busy", state === "busy");
     button.classList.toggle("xvd-generic-error", state === "error");
     button.classList.toggle("xvd-generic-done", state === "done");
-    button.classList.add("xvd-generic-visible");
+    wrap.classList.toggle("xvd-generic-downloading", state === "busy");
+    wrap.classList.add("xvd-generic-visible");
   }
 
   function showTemporaryState(text, state, timeout) {
@@ -282,7 +338,7 @@
     button.title = "Download this video";
     button.disabled = false;
     button.classList.remove("xvd-generic-busy", "xvd-generic-error", "xvd-generic-done");
-    button.classList.remove("xvd-generic-visible");
+    wrap.classList.remove("xvd-generic-visible", "xvd-generic-downloading");
   }
 
   function wrapVideo(video) {
@@ -320,15 +376,15 @@
 
     const rect = video.getBoundingClientRect();
     const inset = 8;
-    const buttonWidth = button.offsetWidth || 120;
-    const buttonHeight = button.offsetHeight || 36;
+    const buttonWidth = wrap.offsetWidth || 120;
+    const buttonHeight = wrap.offsetHeight || 36;
     const maxLeft = Math.max(inset, window.innerWidth - buttonWidth - inset);
     const maxTop = Math.max(inset, window.innerHeight - buttonHeight - inset);
     const top = Math.min(maxTop, Math.max(inset, rect.top + 12));
     const left = Math.min(maxLeft, Math.max(inset, rect.right - buttonWidth - 12));
 
-    button.style.top = `${top}px`;
-    button.style.left = `${left}px`;
+    wrap.style.top = `${top}px`;
+    wrap.style.left = `${left}px`;
   }
 
   function showButton(video) {
@@ -337,13 +393,13 @@
     window.clearTimeout(hideTimer);
     activeVideo = video;
     positionButton(video);
-    button.classList.add("xvd-generic-visible");
+    wrap.classList.add("xvd-generic-visible");
   }
 
   function scheduleHide() {
     hideTimer = window.setTimeout(() => {
       if (button.dataset.state === "busy" || button.dataset.state === "done") return;
-      button.classList.remove("xvd-generic-visible");
+      wrap.classList.remove("xvd-generic-visible");
       button.textContent = "Download";
     }, 250);
   }
@@ -375,7 +431,7 @@
 
     const elements = document.elementsFromPoint(x, y);
     for (const element of elements) {
-      if (element === button || button.contains(element)) continue;
+      if (element === wrap || wrap.contains(element)) continue;
 
       const direct = element.closest?.("video");
       if (direct) return direct;
@@ -400,7 +456,7 @@
   }
 
   function isPointerOverButton(x, y) {
-    return button.isConnected && isPointerInside(button, x, y);
+    return wrap.isConnected && isPointerInside(wrap, x, y);
   }
 
   window.setInterval(() => {

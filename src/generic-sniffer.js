@@ -20,7 +20,8 @@
   };
   const cached = { mp4: [], hls: [] };
 
-  function mediaKind(url) {
+  function mediaKind(url, forcedKind) {
+    if (forcedKind === "hls") return "hls";
     if (!url || typeof url !== "string") return null;
     if (url.startsWith("blob:") || url.startsWith("data:")) return null;
 
@@ -30,6 +31,7 @@
       const path = parsed.pathname + parsed.search;
       if (/\.mp4(?:[/?#]|$)/i.test(path)) return "mp4";
       if (/\.m3u8(?:[/?#]|$)/i.test(path)) return "hls";
+      if (isLikelyHlsEndpoint(parsed)) return "hls";
     } catch {
       return null;
     }
@@ -37,8 +39,17 @@
     return null;
   }
 
-  function rememberUrl(url) {
-    const kind = mediaKind(url);
+  function isLikelyHlsEndpoint(parsed) {
+    const path = parsed.pathname.toLowerCase();
+    return (
+      /(?:^|\/)(?:master)?playlist(?:\/|$)/i.test(path) ||
+      /(?:^|\/)hls(?:\/|$)/i.test(path) ||
+      /(?:^|\/)m3u8(?:\/|$)/i.test(path)
+    );
+  }
+
+  function rememberUrl(url, forcedKind) {
+    const kind = mediaKind(url, forcedKind);
     if (!kind) return;
 
     const absoluteUrl = new URL(url, window.location.href).href;
@@ -72,10 +83,15 @@
       .replace(/&amp;/g, "&");
   }
 
-  function publish(text) {
+  function publish(text, sourceUrl) {
     if (typeof text !== "string") return;
 
     const normalized = normalize(text);
+
+    if (sourceUrl && /^#EXTM3U\b/i.test(normalized.trim())) {
+      rememberUrl(sourceUrl, "hls");
+    }
+
     rememberUrl(normalized);
 
     for (const match of normalized.matchAll(patterns.mp4)) {
@@ -88,7 +104,13 @@
 
   function canReadAsText(response) {
     const type = response.headers?.get?.("content-type") || "";
-    return /json|text|javascript|xml|mpegurl|vnd\.apple\.mpegurl|x-mpegurl|x-www-form-urlencoded/i.test(type);
+    return /json|text|xml|mpegurl|vnd\.apple\.mpegurl|x-mpegurl|x-www-form-urlencoded/i.test(type);
+  }
+
+  function responseMediaKind(response) {
+    const type = response.headers?.get?.("content-type") || "";
+    if (/mpegurl|vnd\.apple\.mpegurl|x-mpegurl/i.test(type)) return "hls";
+    return null;
   }
 
   if (typeof window.fetch === "function") {
@@ -97,9 +119,9 @@
       const response = await originalFetch.apply(this, args);
 
       try {
-        publish(response.url);
+        rememberUrl(response.url, responseMediaKind(response));
         if (canReadAsText(response)) {
-          response.clone().text().then(publish).catch(() => {});
+          response.clone().text().then((text) => publish(text, response.url)).catch(() => {});
         }
       } catch {
         // Detection must never affect page networking.
@@ -122,10 +144,15 @@
   XMLHttpRequest.prototype.send = function xvdGenericSend(...args) {
     this.addEventListener("load", () => {
       try {
-        publish(this.responseURL || this.__xvdGenericUrl);
+        const responseUrl = this.responseURL || this.__xvdGenericUrl;
+        const type = this.getResponseHeader?.("content-type") || "";
+        rememberUrl(
+          responseUrl,
+          /mpegurl|vnd\.apple\.mpegurl|x-mpegurl/i.test(type) ? "hls" : null
+        );
 
         if (!this.responseType || this.responseType === "text") {
-          publish(this.responseText);
+          publish(this.responseText, responseUrl);
         }
       } catch {
         // Some response types throw when responseText is accessed.
