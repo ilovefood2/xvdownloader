@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.10.0] - 2026-06-30
+
+### Added
+- Test harness at `test/hls-test.html` to verify the HLS pipeline (including the
+  ffmpeg encrypted/TS paths) against public test streams, without the extension
+  running on any real website. Open it at
+  `chrome-extension://<id>/test/hls-test.html`.
+
+### Changed
+- Extracted the HLS/media pipeline (fetch, parse, concat, ffmpeg decrypt/remux,
+  pause/cancel) into a shared ES module `src/hls.js`, used by both the offscreen
+  document and the test harness. `src/offscreen.js` is now a thin adapter.
+
 ## [1.9.0] - 2026-06-30
 
 ### Added
