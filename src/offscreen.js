@@ -52,20 +52,21 @@ async function prepare(msg) {
   const control = new DownloadControl();
   if (jobId != null) controls.set(jobId, control);
   const onProgress = (done, total) => reportProgress(jobId, done, total);
+  const credentials = msg.credentials || "include";
 
   try {
     let result;
     if (msg.direct) {
       console.log("[XVD] preparing direct MP4");
       try {
-        result = await downloadDirect(msg.direct, { credentials: "include" });
+        result = await downloadDirect(msg.direct, { credentials });
       } catch (e) {
         if (!msg.hls) throw e;
         console.log("[XVD] direct MP4 failed, falling back to HLS:", e.message);
         result = await downloadHls(msg.hls, {
           control,
           onProgress,
-          credentials: "include",
+          credentials,
         });
       }
     } else if (msg.hls) {
@@ -73,7 +74,7 @@ async function prepare(msg) {
       result = await downloadHls(msg.hls, {
         control,
         onProgress,
-        credentials: "include",
+        credentials,
       });
     } else {
       throw new Error("No downloadable video found");

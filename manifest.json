@@ -1,17 +1,15 @@
 {
   "manifest_version": 3,
   "name": "X Video Downloader",
-  "version": "1.10.0",
-  "description": "Hover over a video in a tweet on x.com to download it.",
+  "version": "1.11.0",
+  "description": "Hover over videos on x.com and other websites to download MP4 or HLS media.",
   "permissions": ["downloads", "offscreen"],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
   "host_permissions": [
-    "https://x.com/*",
-    "https://twitter.com/*",
-    "https://cdn.syndication.twimg.com/*",
-    "https://video.twimg.com/*"
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
     "service_worker": "src/background.js"
@@ -28,6 +26,22 @@
       "js": ["src/content.js"],
       "css": ["src/styles.css"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "exclude_matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["src/generic-sniffer.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "exclude_matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["src/generic-content.js"],
+      "css": ["src/generic-styles.css"],
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
   "icons": {

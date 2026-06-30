@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.11.0] - 2026-06-30
+
+### Added
+- Added a separate generic website downloader path for non-X pages. It detects
+  direct `.mp4` and `.m3u8` URLs from video elements, browser performance
+  entries, and page fetch / XHR responses.
+- Generic website downloads reuse the existing offscreen HLS pipeline, including
+  ffmpeg.wasm support for encrypted AES-128 or MPEG-TS HLS streams.
+
+### Changed
+- Broadened host permissions to normal `http://` and `https://` pages so the
+  generic downloader can run outside x.com / twitter.com.
+- Kept the original X.com / twitter.com scripts and message flow in place for
+  the X-specific downloader.
+
 ## [1.10.0] - 2026-06-30
 
 ### Added

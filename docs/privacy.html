@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Privacy Policy — X Video Downloader</title>
+    <title>Privacy Policy - X Video Downloader</title>
     <meta
       name="description"
       content="Privacy policy for the X Video Downloader Chrome extension."
@@ -68,22 +68,23 @@
     </style>
   </head>
   <body>
-    <h1>Privacy Policy — X Video Downloader</h1>
+    <h1>Privacy Policy - X Video Downloader</h1>
     <p class="updated">Last updated: June 30, 2026</p>
 
     <p>
       X Video Downloader ("the extension") is a browser extension that lets you
-      download videos from tweets on x.com / twitter.com. Your privacy matters,
-      and this policy explains exactly what the extension does and does not do
-      with data.
+      download videos from x.com / twitter.com and, starting in version 1.11.0,
+      from other websites when the page exposes a direct MP4 or HLS media URL.
+      Your privacy matters, and this policy explains exactly what the extension
+      does and does not do with data.
     </p>
 
     <h2>Summary</h2>
     <p>
-      <strong
-        >The extension does not collect, store, transmit, or sell any personal
-        information.</strong
-      >
+      <strong>
+        The extension does not collect, store, transmit, or sell any personal
+        information.
+      </strong>
       There are no analytics, no tracking, no accounts, and no third-party
       servers operated by us.
     </p>
@@ -91,20 +92,25 @@
     <h2>What the extension does</h2>
     <ul>
       <li>
-        Runs a content script on <code>x.com</code> and
-        <code>twitter.com</code> that detects videos in tweets and shows a
-        <strong>Download</strong> button when you hover over a video.
+        On <code>x.com</code> and <code>twitter.com</code>, it detects videos in
+        tweets and shows a <strong>Download</strong> button when you hover over
+        a video.
       </li>
       <li>
-        To find the video's direct MP4 link, it inspects the responses from X's
-        own API that your browser already loads while you use the site. This
-        inspection happens locally in your browser; nothing is sent anywhere.
-        (As a fallback it may request public tweet data from X's syndication
-        endpoint, <code>cdn.syndication.twimg.com</code>.)
+        On other normal <code>http://</code> and <code>https://</code> websites,
+        it detects video elements and looks locally for direct
+        <code>.mp4</code> or <code>.m3u8</code> media URLs.
       </li>
       <li>
-        Saves the resulting MP4 file to your computer using the browser's
-        standard download feature.
+        To find media URLs, it inspects page information that your browser
+        already loads, such as video element sources, browser performance
+        entries, and page fetch / XHR responses. This inspection happens locally
+        in your browser.
+      </li>
+      <li>
+        When you click <strong>Download</strong>, it saves the selected media
+        file to your computer using Chrome's standard download feature. HLS
+        streams may be assembled locally in the extension's offscreen document.
       </li>
     </ul>
     <p>
@@ -117,29 +123,27 @@
     <ul>
       <li>
         It does <strong>not</strong> collect personally identifiable
-        information, browsing history, credentials, or analytics.
+        information, browsing history, credentials, cookies, messages, or
+        analytics.
       </li>
       <li>
         It does <strong>not</strong> send any data to servers operated by the
-        developer (there are none).
+        developer. There are no developer-operated servers.
       </li>
       <li>
-        It does <strong>not</strong> use cookies or persistent identifiers for
-        tracking.
+        It does <strong>not</strong> use persistent identifiers for tracking.
       </li>
     </ul>
 
     <h2>Network requests</h2>
     <p>
-      The extension downloads the video file from X's media servers
-      (<code>https://video.twimg.com</code>) when you click Download. As a
-      fallback it may also request public tweet data from X's syndication
-      endpoint (<code>https://cdn.syndication.twimg.com</code>). It makes no
-      other network requests, and reading X's already-loaded API responses to
-      locate the video happens locally in your browser. All such requests go
-      directly between your browser and X's servers and are subject to
-      <a href="https://twitter.com/en/privacy">X's Privacy Policy</a>.
+      When you click <strong>Download</strong>, the extension may request the
+      media file, HLS playlist, HLS segments, or encryption key directly from
+      the website or media host that served the video. These requests happen
+      between your browser and that website or media host, and are subject to
+      that website's own privacy policy.
     </p>
+    <p>The extension does not send user data to any developer-operated server.</p>
 
     <h2>Permissions</h2>
     <table>
@@ -152,25 +156,30 @@
       <tbody>
         <tr>
           <td><code>downloads</code></td>
-          <td>To save the selected video file to your device.</td>
+          <td>
+            To save the selected video file to your device after you click
+            Download.
+          </td>
         </tr>
         <tr>
-          <td>Host access to <code>x.com</code> / <code>twitter.com</code></td>
-          <td>To show the download button on tweets.</td>
+          <td><code>offscreen</code></td>
+          <td>
+            To assemble HLS media and build downloadable blobs in Manifest V3.
+          </td>
         </tr>
         <tr>
           <td>
-            Host access to <code>cdn.syndication.twimg.com</code> /
-            <code>video.twimg.com</code>
+            Host access to <code>http://*/*</code> and
+            <code>https://*/*</code>
           </td>
-          <td>To resolve and fetch the video file.</td>
+          <td>
+            To detect videos and media URLs on x.com, twitter.com, and other
+            websites where the extension is used.
+          </td>
         </tr>
       </tbody>
     </table>
-    <p>
-      The extension requests no other permissions and does not run on any other
-      websites.
-    </p>
+    <p>The extension requests no other permissions.</p>
 
     <h2>Data sharing and sale</h2>
     <p>

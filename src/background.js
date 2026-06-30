@@ -193,7 +193,7 @@ async function ensureOffscreen() {
 // Fetch the media in the offscreen document (credentialed, so X's CDN serves
 // restricted/4K videos that it refuses to a plain chrome.downloads request),
 // and get back a blob URL to download. Handles both direct MP4 and HLS.
-async function prepareViaOffscreen(meta, jobId) {
+async function prepareViaOffscreen(meta, jobId, credentials) {
   await ensureOffscreen();
   // No overall timeout here: a download can be paused indefinitely by the user.
   // Per-request timeouts in the offscreen doc still guard against dead requests.
@@ -203,6 +203,7 @@ async function prepareViaOffscreen(meta, jobId) {
     jobId,
     direct: meta.url || null,
     hls: meta.hls || null,
+    credentials,
   });
   if (!res || !res.ok) throw new Error((res && res.error) || "Download failed");
   return res; // { ok, blobUrl, ext }
@@ -250,6 +251,68 @@ async function startDownload(meta, tweetId, jobId) {
   return prepared.blobUrl;
 }
 
+async function startGenericDownload(meta, requestedFilename, jobId) {
+  if (!meta.url && !meta.hls) throw new Error("No downloadable video found");
+
+  console.log("[XVD] preparing generic media", {
+    via: meta.url ? "direct" : "hls",
+    src: meta.url || meta.hls,
+  });
+
+  const prepared = await prepareViaOffscreen(meta, jobId, "include");
+  const filename = buildGenericFilename(requestedFilename, prepared.ext);
+
+  const id = await new Promise((resolve) =>
+    chrome.downloads.download(
+      { url: prepared.blobUrl, filename, saveAs: false },
+      resolve
+    )
+  );
+  if (id == null) {
+    throw new Error(
+      (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
+        "Download blocked"
+    );
+  }
+  pendingRevokes.set(id, prepared.blobUrl);
+  return prepared.blobUrl;
+}
+
+function isHttpMediaUrl(url, extPattern) {
+  if (!url || typeof url !== "string") return false;
+  if (url.startsWith("blob:") || url.startsWith("data:")) return false;
+
+  try {
+    const parsed = new URL(url);
+    return (
+      (parsed.protocol === "https:" || parsed.protocol === "http:") &&
+      extPattern.test(parsed.pathname + parsed.search)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeGenericName(value) {
+  return String(value || "")
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[. ]+$/g, "")
+    .slice(0, 150);
+}
+
+function buildGenericFilename(requestedFilename, ext) {
+  const extension = (ext || "mp4").replace(/[^a-z0-9]/gi, "") || "mp4";
+  let base = sanitizeGenericName(requestedFilename).replace(/\.[a-z0-9]{2,5}$/i, "");
+
+  if (!base || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base)) {
+    base = "video";
+  }
+
+  return `${base}.${extension}`;
+}
+
 // Active jobs, so segment-progress from the offscreen doc can be forwarded to
 // the tab/button that started the download.
 let jobSeq = 0;
@@ -288,6 +351,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     }
     return false;
+  }
+
+  if (msg && msg.type === "XVD_GENERIC_DOWNLOAD") {
+    (async () => {
+      const direct = isHttpMediaUrl(msg.direct, /\.mp4(\?|$)/i) ? msg.direct : null;
+      const hls = isHttpMediaUrl(msg.hls, /\.m3u8(\?|$)/i) ? msg.hls : null;
+
+      const jobId = ++jobSeq;
+      jobs.set(jobId, {
+        tabId: sender && sender.tab && sender.tab.id,
+        requestId: msg.requestId,
+      });
+
+      try {
+        const url = await startGenericDownload(
+          { url: direct, hls },
+          msg.filename,
+          jobId
+        );
+        sendResponse({ ok: true, url });
+      } catch (e) {
+        sendResponse({ ok: false, error: (e && e.message) || "Error" });
+      } finally {
+        jobs.delete(jobId);
+      }
+    })();
+
+    return true;
   }
 
   if (msg.type !== "XVD_DOWNLOAD") return false;

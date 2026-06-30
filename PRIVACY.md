@@ -1,10 +1,12 @@
-# Privacy Policy — X Video Downloader
+# Privacy Policy - X Video Downloader
 
 _Last updated: June 30, 2026_
 
 X Video Downloader ("the extension") is a browser extension that lets you
-download videos from tweets on x.com / twitter.com. Your privacy matters, and
-this policy explains exactly what the extension does and does not do with data.
+download videos from x.com / twitter.com and, starting in version 1.11.0, from
+other websites when the page exposes a direct MP4 or HLS media URL. Your privacy
+matters, and this policy explains exactly what the extension does and does not
+do with data.
 
 ## Summary
 
@@ -14,15 +16,16 @@ third-party servers operated by us.
 
 ## What the extension does
 
-- Runs a content script on `x.com` and `twitter.com` that detects videos in
-  tweets and shows a **Download** button when you hover over a video.
-- To find the video's direct MP4 link, it inspects the responses from X's own
-  API that your browser already loads while you use the site. This inspection
-  happens locally in your browser; nothing is sent anywhere. (As a fallback it
-  may request public tweet data from X's syndication endpoint,
-  `cdn.syndication.twimg.com`.)
-- Saves the resulting MP4 file to your computer using the browser's standard
-  download feature.
+- On x.com and twitter.com, it detects videos in tweets and shows a
+  **Download** button when you hover over a video.
+- On other normal `http://` and `https://` websites, it detects video elements
+  and looks locally for direct `.mp4` or `.m3u8` media URLs.
+- To find media URLs, it inspects page information that your browser already
+  loads, such as video element sources, browser performance entries, and page
+  fetch / XHR responses. This inspection happens locally in your browser.
+- When you click **Download**, it saves the selected media file to your computer
+  using Chrome's standard download feature. HLS streams may be assembled locally
+  in the extension's offscreen document.
 
 All of this happens locally in your browser and only in response to your click.
 
@@ -30,32 +33,30 @@ All of this happens locally in your browser and only in response to your click.
 
 The extension collects **no data**. Specifically:
 
-- It does **not** collect personally identifiable information, browsing
-  history, credentials, or analytics.
-- It does **not** send any data to servers operated by the developer (there are
-  none).
-- It does **not** use cookies or persistent identifiers for tracking.
+- It does **not** collect personally identifiable information, browsing history,
+  credentials, cookies, messages, or analytics.
+- It does **not** send any data to servers operated by the developer. There are
+  no developer-operated servers.
+- It does **not** use persistent identifiers for tracking.
 
 ## Network requests
 
-The extension downloads the video file from X's media servers
-(`https://video.twimg.com`) when you click Download. As a fallback it may also
-request public tweet data from X's syndication endpoint
-(`https://cdn.syndication.twimg.com`). It makes no other network requests, and
-reading X's already-loaded API responses to locate the video happens locally in
-your browser. All such requests go directly between your browser and X's servers
-and are subject to [X's Privacy Policy](https://twitter.com/en/privacy).
+When you click **Download**, the extension may request the media file, HLS
+playlist, HLS segments, or encryption key directly from the website or media host
+that served the video. These requests happen between your browser and that
+website or media host, and are subject to that website's own privacy policy.
+
+The extension does not send user data to any developer-operated server.
 
 ## Permissions
 
 | Permission | Why it is needed |
 | --- | --- |
-| `downloads` | To save the selected video file to your device. |
-| Host access to `x.com` / `twitter.com` | To show the download button on tweets. |
-| Host access to `cdn.syndication.twimg.com` / `video.twimg.com` | To resolve and fetch the video file. |
+| `downloads` | To save the selected video file to your device after you click Download. |
+| `offscreen` | To assemble HLS media and build downloadable blobs in Manifest V3. |
+| Host access to `http://*/*` and `https://*/*` | To detect videos and media URLs on x.com, twitter.com, and other websites where the extension is used. |
 
-The extension requests no other permissions and does not run on any other
-websites.
+The extension requests no other permissions.
 
 ## Data sharing and sale
 
