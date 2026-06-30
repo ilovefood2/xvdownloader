@@ -17,35 +17,53 @@ function syndicationToken(id) {
     .replace(/(0+|\.)/g, "");
 }
 
-/** Collect every video variant list found anywhere in the tweet payload. */
+/** True when an array looks like a list of media variants. */
+function isVariantList(arr) {
+  return (
+    Array.isArray(arr) &&
+    arr.some((v) => v && (v.content_type || v.type) && v.url)
+  );
+}
+
+/**
+ * Collect every video variant list found anywhere in the tweet payload.
+ *
+ * The syndication payload nests media in different places depending on the
+ * tweet (mediaDetails, extended_entities, quoted_tweet, sensitive-media
+ * wrappers, cards, …), so we recursively walk the whole object and pick up any
+ * `variants` / `video_info.variants` array we encounter, deduped by URL.
+ */
 function collectVideos(data) {
   const videos = [];
+  const seen = new Set();
 
-  const consider = (entity) => {
-    if (!entity || typeof entity !== "object") return;
-    const info = entity.video_info;
-    if (info && Array.isArray(info.variants)) {
-      videos.push(info.variants);
-    }
+  const add = (variants) => {
+    if (!isVariantList(variants)) return;
+    const key = variants.map((v) => v && v.url).join("|");
+    if (seen.has(key)) return;
+    seen.add(key);
+    videos.push(variants);
   };
 
-  // Primary tweet media.
-  if (Array.isArray(data.mediaDetails)) data.mediaDetails.forEach(consider);
-  if (data.video && Array.isArray(data.video.variants)) {
-    videos.push(data.video.variants);
-  }
-  // Quoted tweet media.
-  if (data.quoted_tweet && Array.isArray(data.quoted_tweet.mediaDetails)) {
-    data.quoted_tweet.mediaDetails.forEach(consider);
-  }
+  const visit = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (node.video_info) add(node.video_info.variants);
+    add(node.variants);
+    for (const key in node) visit(node[key]);
+  };
 
+  visit(data);
   return videos;
 }
 
 /** Pick the highest-bitrate MP4 url from a list of variants. */
 function bestMp4(variants) {
   const mp4s = variants.filter(
-    (v) => v && v.content_type === "video/mp4" && v.url
+    (v) => v && (v.content_type === "video/mp4" || v.type === "video/mp4") && v.url
   );
   if (!mp4s.length) return null;
   mp4s.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
@@ -69,12 +87,21 @@ async function resolveVideoUrl(tweetId, index) {
   }
   const data = await resp.json();
 
+  // Sensitive / protected / deleted tweets come back as a tombstone with no
+  // media; surface that instead of a generic "no video".
+  if (data.__typename === "TweetTombstone" || data.tombstone) {
+    throw new Error("Tweet unavailable (sensitive or protected)");
+  }
+
   const videos = collectVideos(data);
   if (!videos.length) throw new Error("No video found");
 
   const chosen = videos[Math.min(index || 0, videos.length - 1)];
-  const mp4 = bestMp4(chosen) || bestMp4(videos[0]);
-  if (!mp4) throw new Error("No MP4 variant");
+  // Try the matched video first, then any other video in the tweet, so an
+  // HLS-only entry doesn't block a sibling that has an MP4.
+  let mp4 = bestMp4(chosen);
+  for (let i = 0; !mp4 && i < videos.length; i++) mp4 = bestMp4(videos[i]);
+  if (!mp4) throw new Error("Only streaming (HLS) format available");
 
   return {
     url: mp4,

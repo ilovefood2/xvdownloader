@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "X Video Downloader",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Hover over a video in a tweet on x.com to download it.",
   "permissions": ["downloads"],
   "host_permissions": [
