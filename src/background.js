@@ -419,9 +419,17 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
         { allowTsFallback: true }
       );
     } catch (e) {
-      if (!source.hls || !source.url) throw e;
-      console.log("[XVD] generic HLS failed, falling back to direct media:", e.message);
-      prepared = await prepareViaOffscreen({ url: source.url, hls: null }, jobId, credentials);
+      if (source.mux && source.url) {
+        // The adaptive remux failed (often ffmpeg OOM) — fall back to the
+        // progressive MP4 so the download still succeeds at lower quality.
+        console.log("[XVD] YouTube mux failed, falling back to progressive MP4:", e.message);
+        prepared = await prepareViaOffscreen({ url: source.url, hls: null, mux: null }, jobId, credentials);
+      } else if (source.hls && source.url) {
+        console.log("[XVD] generic HLS failed, falling back to direct media:", e.message);
+        prepared = await prepareViaOffscreen({ url: source.url, hls: null }, jobId, credentials);
+      } else {
+        throw e;
+      }
     }
 
     const filename = buildGenericFilename(requestedFilename, prepared.ext);
@@ -633,16 +641,19 @@ function pickYouTubeProgressiveMp4(playerResponse) {
   return mp4s[0] || null;
 }
 
-// The video-only stream is muxed with ffmpeg.wasm entirely in memory, so cap it
-// well clear of the wasm heap limit. A high-bitrate 1080p60 stream of a long
-// video can exceed 250 MB, which reliably triggers an out-of-memory abort.
-const YT_MAX_MUX_HEIGHT = 1080;
-const YT_MAX_MUX_VIDEO_BYTES = 220 * 1024 * 1024;
+// The video-only stream is muxed with ffmpeg.wasm entirely in memory, so the
+// byte budget — not the resolution — is the real out-of-memory guard. The height
+// cap is just a sane ceiling; the picker takes the highest resolution whose file
+// still fits the budget, so short 1440p/4K clips qualify while long ones step
+// down to 1080p.
+const YT_MAX_MUX_HEIGHT = 2160;
+const YT_MAX_MUX_VIDEO_BYTES = 190 * 1024 * 1024;
 
-// When no progressive MP4 exists, fall back to the best directly-fetchable
-// video-only + audio-only MP4 streams so the offscreen ffmpeg step can merge
-// them. Prefer the highest resolution that fits the memory budget, but never
-// fail outright over a missing/oversized stream — fall back to the smallest.
+// Pick the best directly-fetchable video-only + audio-only MP4 streams for the
+// offscreen ffmpeg step to merge — this yields far higher quality (up to 4K)
+// than YouTube's lone 360p progressive MP4. Prefer the highest resolution that
+// fits the memory budget, but never fail outright over a missing/oversized
+// stream — fall back to the smallest.
 function pickYouTubeAdaptiveMux(playerResponse) {
   const formats = playerResponse?.streamingData?.adaptiveFormats || [];
   const direct = (format) =>
@@ -748,13 +759,14 @@ async function resolveYouTubeMedia(videoId) {
     );
   }
 
-  // Prefer a single progressive MP4 (no remux, no ffmpeg memory pressure).
+  // Prefer the higher-quality muxed adaptive streams (up to 4K). Keep the
+  // progressive MP4, when present, as a fallback URL in case the in-browser
+  // remux fails (e.g. ffmpeg runs out of memory).
   const progressive = pickYouTubeProgressiveMp4(data);
-  if (progressive) return { url: progressive.url };
-
-  // Otherwise merge the best video-only + audio-only MP4 streams via ffmpeg.
   const mux = pickYouTubeAdaptiveMux(data);
-  if (mux) return { mux };
+
+  if (mux) return { mux, url: progressive ? progressive.url : null };
+  if (progressive) return { url: progressive.url };
 
   throw new Error("No downloadable YouTube MP4 found");
 }

@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.11.12] - 2026-06-30
+
+### Changed
+- YouTube now downloads high quality by default. Previously it preferred
+  YouTube's lone progressive MP4 (typically 360p); it now merges the best
+  adaptive video + audio streams with the bundled FFmpeg, picking the highest
+  resolution that fits the in-browser memory budget (commonly 1080p, up to
+  1440p/4K for shorter clips). If the remux fails (e.g. FFmpeg runs out of
+  memory) it falls back to the progressive MP4 so the download still succeeds.
+
 ## [1.11.11] - 2026-06-30
 
 ### Added
