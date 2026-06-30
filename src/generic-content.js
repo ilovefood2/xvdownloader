@@ -510,11 +510,11 @@
     return pathId ? valid(pathId) : null;
   }
 
-  // generic hides the real MP4s behind an authorized XHR; the page's bare
-  // gvideo .mp4 link 403s. Replicate the player's hash transform (4x 8-hex
-  // chunks -> base36, no padding) and call the API. The returned URL is signed
-  // to the caller's IP, so this must run in the page, not the background.
-  function genericApiHash(hash) {
+  // Some sites hide the real MP4s behind an authorized XHR; the page's bare
+  // .mp4 link 403s. Replicate the player's hash transform (4x 8-hex chunks ->
+  // base36, no padding) and call the API. The returned URL is signed to the
+  // caller's IP, so this must run in the page, not the background.
+  function authorizedXhrHash(hash) {
     if (!/^[0-9a-f]{32}$/i.test(hash)) return null;
     let out = "";
     for (let i = 0; i < 32; i += 8) {
@@ -523,7 +523,7 @@
     return out;
   }
 
-  async function resolveGenericMediaUrl() {
+  async function resolveAuthorizedXhrMediaUrl() {
     const host = window.location.hostname.toLowerCase();
     if (!/(^|\.)generic\.com$/.test(host)) return null;
 
@@ -534,7 +534,7 @@
     const rawHash =
       (html.match(/EP\.video\.player\.hash\s*=\s*['"]([0-9a-f]{32})['"]/i) || [])[1] ||
       (html.match(/\bhash\s*[:=]\s*['"]([0-9a-f]{32})['"]/i) || [])[1];
-    const apiHash = rawHash && genericApiHash(rawHash);
+    const apiHash = rawHash && authorizedXhrHash(rawHash);
     if (!apiHash) return null;
 
     const params = new URLSearchParams({
@@ -571,11 +571,11 @@
     const youtubeVideoId = getYouTubeVideoId();
     let mux = null;
 
-    // generic's authorized URL overrides anything sniffed (its bare page link 403s).
+    // The authorized-XHR URL overrides anything sniffed (the bare page link 403s).
     try {
-      const generic = await resolveGenericMediaUrl();
-      if (generic) {
-        direct = generic;
+      const authorized = await resolveAuthorizedXhrMediaUrl();
+      if (authorized) {
+        direct = authorized;
         hls = null;
       }
     } catch (e) {

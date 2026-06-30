@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.11.31] - 2026-06-30
+
+### Changed
+- Genericized internal comments, identifiers, and changelog wording (no
+  behavior change).
+
 ## [1.11.30] - 2026-06-30
 
 ### Changed
@@ -117,8 +123,8 @@
 ## [1.11.17] - 2026-06-30
 
 ### Changed
-- All direct downloads (X, TikTok, generic, generic MP4, and the YouTube
-  progressive fallback) now use the same concurrent Range-chunk downloader as
+- All direct downloads (X, TikTok, generic MP4, and the YouTube progressive
+  fallback) now use the same concurrent Range-chunk downloader as
   the YouTube mux path — 10 MB chunks, 5 in parallel — which is much faster and
   bypasses per-connection rate throttling. Servers that don't support Range fall
   back automatically to a single streamed GET, and HTML error pages served in
@@ -127,11 +133,11 @@
 ## [1.11.16] - 2026-06-30
 
 ### Added
-- Added generic support. The page's bare `gvideo` MP4 link 403s; the real
-  per-quality MP4s come from an authorized XHR (`/xhr/video/<id>`) whose hash is
-  derived from the page (four 8-hex-digit chunks → base36). The extension now
-  replicates that, calls the API from the page (the returned URL is signed to
-  the viewer's IP, so it must run there), and downloads the highest quality.
+- Added support for sites that expose video only through an authorized XHR. The
+  page's bare MP4 link 403s; the real per-quality MP4s come from an XHR endpoint
+  whose hash is derived from the page (four 8-hex-digit chunks → base36). The
+  extension replicates that and calls the API from the page (the returned URL is
+  signed to the viewer's IP, so it must run there), downloading the best quality.
 
 ## [1.11.15] - 2026-06-30
 
@@ -194,24 +200,24 @@
   it. Several CDNs (TikTok, YouTube) return 403 to any request carrying an
   Origin, and Chrome forces a `chrome-extension://` Origin onto extension
   fetches; native players send none for media. This also covers the previous
-  YouTube/a gated site cases.
+  YouTube and Referer-gated HLS cases.
 
 ## [1.11.10] - 2026-06-30
 
 ### Fixed
 - Fixed generic HLS detection picking up a bogus URL on sites that declare the
-  stream inside an inline script (e.g. a gated site's `var hlsUrl = '…m3u8';…`). The
-  whole script snippet was being resolved as a relative URL and mistaken for the
+  stream inside an inline script (e.g. `var hlsUrl = '…m3u8';…`). The whole
+  script snippet was being resolved as a relative URL and mistaken for the
   playlist, so the download hit a non-existent path and 403'd. Media detection
   now rejects candidates that aren't a single clean URL token; the real playlist
   URL is still recovered via regex extraction. Combined with the v1.11.9 Referer
-  fix, Referer-gated sites like a gated site now download correctly.
+  fix, Referer-gated sites now download correctly.
 
 ## [1.11.9] - 2026-06-30
 
 ### Fixed
-- Fixed generic HLS/MP4 downloads that failed with a 403 on Referer-gated CDNs
-  (e.g. a gated site). The extension now spoofs the page's `Referer`/`Origin`
+- Fixed generic HLS/MP4 downloads that failed with a 403 on Referer-gated CDNs.
+  The extension now spoofs the page's `Referer`/`Origin`
   headers for its own download requests via a `declarativeNetRequest` rule,
   scoped to tab-less extension requests (`tabIds: [-1]`) and the media host so
   normal browsing and unrelated downloads are unaffected. The rule is added at
