@@ -3,6 +3,13 @@
 All notable changes to X Video Downloader are recorded here. The version here
 matches the `version` field in `manifest.json`.
 
+## [1.6.0] - 2026-06-30
+
+### Added
+- Download progress on the button. For HLS downloads (which can be hundreds or
+  thousands of segments for long/4K videos), the button now shows a live
+  percentage instead of a static "Fetching…", then "Saved" when finished.
+
 ## [1.5.1] - 2026-06-30
 
 ### Fixed

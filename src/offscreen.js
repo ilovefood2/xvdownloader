@@ -88,13 +88,21 @@ async function prepare(msg) {
       // stream of the same video serves fine. Fall back to it.
       if (msg.hls) {
         console.log("[XVD] direct MP4 failed, falling back to HLS:", hlsError(e));
-        return assemble(msg.hls);
+        return assemble(msg.hls, msg.jobId);
       }
       throw e;
     }
   }
-  if (msg.hls) return assemble(msg.hls);
+  if (msg.hls) return assemble(msg.hls, msg.jobId);
   throw new Error("No downloadable video found");
+}
+
+/** Report HLS download progress back to the originating button. */
+function reportProgress(jobId, done, total) {
+  if (jobId == null) return;
+  chrome.runtime
+    .sendMessage({ type: "XVD_PROGRESS", jobId, done, total })
+    .catch(() => {});
 }
 
 /** Fetch a direct MP4 ourselves so credentials/headers reach X's CDN. */
@@ -154,7 +162,7 @@ function parseMediaPlaylist(text, baseUrl) {
   return { mapUrl, segments, encrypted };
 }
 
-async function assemble(masterUrl) {
+async function assemble(masterUrl, jobId) {
   console.log("[XVD] HLS: fetching playlist", masterUrl);
   const media = await getMediaPlaylist(masterUrl);
   const { mapUrl, segments, encrypted } = parseMediaPlaylist(
@@ -173,11 +181,15 @@ async function assemble(masterUrl) {
 
   let next = 0;
   let done = 0;
+  reportProgress(jobId, 0, urls.length);
   async function worker() {
     while (next < urls.length) {
       const i = next++;
       parts[i] = await fetchSegmentBlob(urls[i]);
       done++;
+      if (done % 10 === 0 || done === urls.length) {
+        reportProgress(jobId, done, urls.length);
+      }
       if (done % 25 === 0 || done === urls.length) {
         console.log("[XVD] HLS:", done + "/" + urls.length, "segments");
       }

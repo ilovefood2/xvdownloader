@@ -97,6 +97,23 @@
     return { wrap, btn };
   }
 
+  // Progress updates (sent from the background while merging HLS) are routed
+  // back to the originating button via a per-click request id.
+  let requestSeq = 0;
+  const jobButtons = new Map(); // requestId -> button
+
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (!msg || msg.type !== "XVD_PROGRESS") return;
+    const btn = jobButtons.get(msg.requestId);
+    if (!btn || btn.dataset.state !== "busy") return;
+    const label = btn.querySelector(".xvd-label");
+    if (!label) return;
+    if (msg.total) {
+      const pct = Math.min(99, Math.floor((msg.done / msg.total) * 100));
+      label.textContent = pct + "%";
+    }
+  });
+
   async function handleClick(videoEl, btn) {
     if (btn.dataset.state === "busy") return;
 
@@ -106,11 +123,14 @@
       return;
     }
 
+    const requestId = "xvd-" + ++requestSeq + "-" + Date.now();
+    jobButtons.set(requestId, btn);
     setButtonState(btn, "busy", "Fetching…");
     try {
       const cached = mediaCache.get(ref.id);
       const res = await chrome.runtime.sendMessage({
         type: "XVD_DOWNLOAD",
+        requestId,
         tweetId: ref.id,
         author: ref.author,
         index: videoIndex(videoEl),
@@ -120,7 +140,7 @@
             : null,
       });
       if (res && res.ok) {
-        setButtonState(btn, "done", "Downloading");
+        setButtonState(btn, "done", "Saved");
         setTimeout(() => setButtonState(btn, "idle", "Download"), 2500);
       } else {
         setButtonState(btn, "error", (res && res.error) || "Failed");
@@ -129,6 +149,8 @@
     } catch (e) {
       setButtonState(btn, "error", "Failed");
       setTimeout(() => setButtonState(btn, "idle", "Download"), 3500);
+    } finally {
+      jobButtons.delete(requestId);
     }
   }
 

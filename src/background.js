@@ -193,11 +193,12 @@ async function ensureOffscreen() {
 // Fetch the media in the offscreen document (credentialed, so X's CDN serves
 // restricted/4K videos that it refuses to a plain chrome.downloads request),
 // and get back a blob URL to download. Handles both direct MP4 and HLS.
-async function prepareViaOffscreen(meta) {
+async function prepareViaOffscreen(meta, jobId) {
   await ensureOffscreen();
   const ask = chrome.runtime.sendMessage({
     type: "XVD_PREPARE",
     target: "offscreen",
+    jobId,
     direct: meta.url || null,
     hls: meta.hls || null,
   });
@@ -225,7 +226,7 @@ chrome.downloads.onChanged.addListener((delta) => {
     .catch(() => {});
 });
 
-async function startDownload(meta, tweetId) {
+async function startDownload(meta, tweetId, jobId) {
   if (!meta.url && !meta.hls) throw new Error("No downloadable video found");
 
   console.log("[XVD] preparing", {
@@ -234,7 +235,7 @@ async function startDownload(meta, tweetId) {
   });
 
   // Always fetch the bytes from the extension context, then download the blob.
-  const prepared = await prepareViaOffscreen(meta);
+  const prepared = await prepareViaOffscreen(meta, jobId);
   const filename = buildFilename(meta, tweetId, prepared.ext);
 
   const id = await new Promise((resolve) =>
@@ -253,10 +254,36 @@ async function startDownload(meta, tweetId) {
   return prepared.blobUrl;
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (!msg || msg.type !== "XVD_DOWNLOAD") return false;
+// Active jobs, so segment-progress from the offscreen doc can be forwarded to
+// the tab/button that started the download.
+let jobSeq = 0;
+const jobs = new Map(); // jobId -> { tabId, requestId }
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Progress relayed from the offscreen document → forward to the origin tab.
+  if (msg && msg.type === "XVD_PROGRESS") {
+    const job = jobs.get(msg.jobId);
+    if (job && job.tabId != null) {
+      chrome.tabs
+        .sendMessage(job.tabId, {
+          type: "XVD_PROGRESS",
+          requestId: job.requestId,
+          done: msg.done,
+          total: msg.total,
+        })
+        .catch(() => {});
+    }
+    return false;
+  }
+
+  if (msg.type !== "XVD_DOWNLOAD") return false;
 
   (async () => {
+    const jobId = ++jobSeq;
+    jobs.set(jobId, {
+      tabId: sender && sender.tab && sender.tab.id,
+      requestId: msg.requestId,
+    });
     try {
       // Prefer variants sniffed from X's own API (works for sensitive tweets);
       // fall back to the public syndication endpoint when nothing was cached.
@@ -268,10 +295,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       if (!meta.author && msg.author) meta.author = msg.author;
 
-      const url = await startDownload(meta, msg.tweetId);
+      const url = await startDownload(meta, msg.tweetId, jobId);
       sendResponse({ ok: true, url });
     } catch (e) {
       sendResponse({ ok: false, error: (e && e.message) || "Error" });
+    } finally {
+      jobs.delete(jobId);
     }
   })();
 
