@@ -507,31 +507,129 @@ export async function downloadDirect(url, { credentials, control, onProgress } =
   return { blob: await readBlobWithProgress(r, { control, onProgress }), ext: "mp4" };
 }
 
+const MUX_CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB, matches yt-dlp's default
+const MUX_CHUNK_CONCURRENCY = 5;
+
+// Probe a stream's total size with a tiny range request, and confirm the server
+// honours Range (206) so we can chunk it.
+async function probeStreamSize(url, credentials) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  let response;
+  try {
+    response = await fetch(url, {
+      credentials: credentials || "omit",
+      cache: "no-store",
+      headers: { Range: "bytes=0-1" },
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!response.ok) throw new Error("Stream HTTP " + response.status);
+  const contentRange = response.headers.get("content-range") || "";
+  const total = parseInt((contentRange.match(/\/(\d+)$/) || [])[1] || "0", 10);
+  try {
+    await response.arrayBuffer();
+  } catch (e) {
+    /* ignore */
+  }
+  return { total, chunkable: response.status === 206 && total > 0 };
+}
+
+// Download a single Range chunk into a Uint8Array, with a per-chunk timeout.
+async function fetchRangeChunk(url, credentials, start, end) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  try {
+    const response = await fetch(url, {
+      credentials: credentials || "omit",
+      cache: "no-store",
+      headers: { Range: `bytes=${start}-${end}` },
+      signal: ctrl.signal,
+    });
+    if (!response.ok) throw new Error("Chunk HTTP " + response.status);
+    return new Uint8Array(await response.arrayBuffer());
+  } catch (e) {
+    if (e && e.name === "AbortError") throw new Error("Chunk timed out");
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Download a media stream as a Blob using concurrent Range requests. YouTube's
+ * googlevideo CDN throttles a single sequential GET to roughly playback speed;
+ * fetching in parallel chunks gets each request a fresh full-speed burst, which
+ * is ~30-40x faster for long videos.
+ */
+async function downloadStreamChunked(url, total, { credentials, control, onProgress } = {}) {
+  const ranges = [];
+  for (let start = 0; start < total; start += MUX_CHUNK_SIZE) {
+    ranges.push([start, Math.min(start + MUX_CHUNK_SIZE - 1, total - 1)]);
+  }
+  const parts = new Array(ranges.length);
+  let done = 0;
+  if (onProgress) onProgress(0, total);
+
+  let next = 0;
+  async function worker() {
+    while (next < ranges.length) {
+      if (control) await control.gate();
+      const i = next++;
+      const [start, end] = ranges[i];
+      const bytes = await fetchRangeChunk(url, credentials, start, end);
+      parts[i] = bytes;
+      done += bytes.length;
+      if (onProgress) onProgress(Math.min(done, total), total);
+    }
+  }
+
+  const results = await Promise.allSettled(
+    Array.from({ length: Math.min(MUX_CHUNK_CONCURRENCY, ranges.length) }, worker)
+  );
+  if (control && control.canceled) throw new CanceledError();
+  const failed = results.find((r) => r.status === "rejected");
+  if (failed) throw failed.reason;
+  return new Blob(parts, { type: "video/mp4" });
+}
+
+// Download a stream as a Blob: chunked Range requests when supported (fast),
+// else a single streamed GET.
+async function downloadStream(url, { credentials, control, onProgress } = {}) {
+  const { total, chunkable } = await probeStreamSize(url, credentials);
+  if (chunkable) {
+    return downloadStreamChunked(url, total, { credentials, control, onProgress });
+  }
+  const fetchTimed = makeFetchTimed(credentials);
+  const response = await fetchTimed(url, 20000);
+  if (!response.ok) throw new Error("Stream HTTP " + response.status);
+  return readBlobWithProgress(response, { control, onProgress });
+}
+
 /**
  * Download separate video-only + audio-only MP4 streams (e.g. YouTube adaptive
  * formats) and mux them into a single MP4 with ffmpeg (stream copy, no re-encode).
  */
 export async function downloadMux(videoUrl, audioUrl, { credentials, control, onProgress } = {}) {
-  const fetchTimed = makeFetchTimed(credentials);
-
-  const videoResponse = await fetchTimed(videoUrl, 20000);
-  if (!videoResponse.ok) throw new Error("Video stream HTTP " + videoResponse.status);
-  const audioResponse = await fetchTimed(audioUrl, 20000);
-  if (!audioResponse.ok) throw new Error("Audio stream HTTP " + audioResponse.status);
-
-  // Combined download progress across both streams, leaving headroom for the mux.
-  const videoTotal = getResponseSize(videoResponse);
-  const audioTotal = getResponseSize(audioResponse);
-  const grandTotal = videoTotal + audioTotal;
+  // Probe both sizes up front for a combined progress bar.
+  const videoProbe = await probeStreamSize(videoUrl, credentials);
+  const audioProbe = await probeStreamSize(audioUrl, credentials);
+  const grandTotal = videoProbe.total + audioProbe.total;
   let completed = 0;
   const trackProgress =
     onProgress && grandTotal
       ? (done) => onProgress(Math.min(completed + done, grandTotal), grandTotal)
       : undefined;
 
-  const videoBlob = await readBlobWithProgress(videoResponse, { control, onProgress: trackProgress });
-  completed = videoTotal;
-  const audioBlob = await readBlobWithProgress(audioResponse, { control, onProgress: trackProgress });
+  const videoBlob = videoProbe.chunkable
+    ? await downloadStreamChunked(videoUrl, videoProbe.total, { credentials, control, onProgress: trackProgress })
+    : await downloadStream(videoUrl, { credentials, control, onProgress: trackProgress });
+  completed = videoProbe.total;
+  const audioBlob = audioProbe.chunkable
+    ? await downloadStreamChunked(audioUrl, audioProbe.total, { credentials, control, onProgress: trackProgress })
+    : await downloadStream(audioUrl, { credentials, control, onProgress: trackProgress });
 
   await control?.gate();
   const ff = await getFfmpeg();

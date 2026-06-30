@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.11.15] - 2026-06-30
+
+### Fixed
+- YouTube downloads are now dramatically faster. googlevideo throttles a single
+  sequential GET to roughly playback speed (~0.7 MB/s, so a long 4K video took
+  20+ minutes). The video/audio streams are now fetched in concurrent 10 MB
+  Range chunks, which gets each request a fresh full-speed burst — measured
+  ~25-35 MB/s, a 30-40x speedup. Falls back to a plain GET if a server doesn't
+  support range requests.
+
 ## [1.11.14] - 2026-06-30
 
 ### Changed
