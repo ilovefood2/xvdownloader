@@ -3,6 +3,16 @@
 All notable changes to X Video Downloader are recorded here. The version here
 matches the `version` field in `manifest.json`.
 
+## [1.8.1] - 2026-06-30
+
+### Fixed
+- Cancel only stopped the UI while the HLS download kept running in the
+  background. The control object was deleted as soon as the first worker
+  stopped, so the remaining concurrent workers recreated a fresh (non-canceled)
+  control and continued. Workers now share a single captured control object and
+  teardown waits for all of them to stop (allSettled), so cancel actually halts
+  the download.
+
 ## [1.8.0] - 2026-06-30
 
 ### Added

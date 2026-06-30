@@ -76,22 +76,17 @@ class CanceledError extends Error {
 // Per-job control for in-progress HLS downloads.
 const controls = new Map(); // jobId -> { paused, canceled, waiters: [] }
 
+function freshControl() {
+  return { paused: false, canceled: false, waiters: [] };
+}
+
 function getControl(jobId) {
   let c = controls.get(jobId);
   if (!c) {
-    c = { paused: false, canceled: false, waiters: [] };
+    c = freshControl();
     controls.set(jobId, c);
   }
   return c;
-}
-
-/** Block while paused; throw if the job has been canceled. */
-async function waitWhilePaused(jobId) {
-  if (jobId == null) return;
-  const c = getControl(jobId);
-  if (c.canceled) throw new CanceledError();
-  if (c.paused) await new Promise((resolve) => c.waiters.push(resolve));
-  if (c.canceled) throw new CanceledError();
 }
 
 function resolveUrl(base, ref) {
@@ -231,12 +226,23 @@ async function assemble(masterUrl, jobId) {
   const parts = new Array(urls.length);
   console.log("[XVD] HLS: downloading", urls.length, "segments");
 
+  // Capture the control ONCE by reference. Every worker checks this same
+  // object, so a cancel/pause is seen by all of them (and we don't recreate it).
+  const control = jobId != null ? getControl(jobId) : freshControl();
+
+  // Block while paused; throw if canceled. Uses the captured control.
+  async function gate() {
+    if (control.canceled) throw new CanceledError();
+    if (control.paused) await new Promise((r) => control.waiters.push(r));
+    if (control.canceled) throw new CanceledError();
+  }
+
   let next = 0;
   let done = 0;
   reportProgress(jobId, 0, urls.length);
   async function worker() {
     while (next < urls.length) {
-      await waitWhilePaused(jobId);
+      await gate();
       const i = next++;
       parts[i] = await fetchSegmentBlob(urls[i]);
       done++;
@@ -252,11 +258,18 @@ async function assemble(masterUrl, jobId) {
     { length: Math.min(SEGMENT_CONCURRENCY, urls.length) },
     worker
   );
-  try {
-    await Promise.all(workers);
-  } finally {
-    controls.delete(jobId);
+
+  // allSettled (not all): wait for EVERY worker to stop before tearing down,
+  // so the cancel flag stays live until they've all seen it.
+  const results = await Promise.allSettled(workers);
+  if (jobId != null) controls.delete(jobId);
+
+  if (control.canceled) {
+    console.log("[XVD] HLS: canceled");
+    throw new CanceledError();
   }
+  const failed = results.find((r) => r.status === "rejected");
+  if (failed) throw failed.reason;
 
   const ext = mapUrl ? "mp4" : "ts";
   const type = ext === "mp4" ? "video/mp4" : "video/mp2t";
