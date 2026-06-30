@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.11.18] - 2026-06-30
+
+### Changed
+- Bumped the parallel download concurrency from 5 to 6 chunks (matches the HLS
+  segment concurrency; ~5-6 already saturates a typical link).
+
+### Fixed
+- Chunked downloading is now strictly best-effort: if the Range probe fails (some
+  CDNs reject a `bytes=0-1` probe) or a chunk errors mid-stream, it falls back to
+  a plain single GET, so it's never worse than a non-chunked download.
+- Recognise embedded/shorts/live YouTube URLs (`/embed/<id>`, `/shorts/<id>`,
+  `/live/<id>`, and `youtube-nocookie.com`) so the resolver handles them, instead
+  of falling back to the sniffed, session-bound `WEB_EMBEDDED_PLAYER` googlevideo
+  URL that returns 403.
+
 ## [1.11.17] - 2026-06-30
 
 ### Changed

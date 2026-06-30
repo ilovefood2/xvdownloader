@@ -503,7 +503,7 @@ export async function downloadDirect(url, { credentials, control, onProgress } =
 }
 
 const STREAM_CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB, matches yt-dlp's default
-const STREAM_CHUNK_CONCURRENCY = 5;
+const STREAM_CHUNK_CONCURRENCY = 6; // enough to saturate a link; matches SEGMENT_CONCURRENCY
 
 // Probe a stream's total size with a tiny range request, and confirm the server
 // honours Range (206) so we can chunk it.
@@ -593,15 +593,29 @@ async function downloadStreamChunked(url, total, { credentials, control, onProgr
 
 // Download a stream as a Blob: concurrent Range chunks when the server supports
 // them (much faster, and bypasses per-connection rate throttling), else a single
-// streamed GET. Rejects HTML error pages served in place of media.
+// streamed GET. Chunking is strictly best-effort — a probe that fails or a chunk
+// download that errors falls back to a plain GET, so this is never worse than a
+// single request. Rejects HTML error pages served in place of media.
 async function downloadStream(url, { credentials, control, onProgress } = {}) {
-  const probe = await probeStreamSize(url, credentials);
-  if (/text\/html/i.test(probe.contentType)) {
+  let probe = null;
+  try {
+    probe = await probeStreamSize(url, credentials);
+  } catch (e) {
+    probe = null; // some CDNs reject a range probe but serve a plain GET fine
+  }
+
+  if (probe && /text\/html/i.test(probe.contentType)) {
     throw new Error("Server returned a web page, not a video");
   }
-  if (probe.chunkable) {
-    return downloadStreamChunked(url, probe.total, { credentials, control, onProgress });
+  if (probe && probe.chunkable) {
+    try {
+      return await downloadStreamChunked(url, probe.total, { credentials, control, onProgress });
+    } catch (e) {
+      if (control && control.canceled) throw e;
+      // Chunked download failed mid-stream — fall through to a single GET.
+    }
   }
+
   const fetchTimed = makeFetchTimed(credentials);
   const response = await fetchTimed(url, 20000);
   if (!response.ok) throw new Error("Stream HTTP " + response.status);

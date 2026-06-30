@@ -399,15 +399,22 @@
 
   function getYouTubeVideoId() {
     const host = window.location.hostname.toLowerCase();
+    const valid = (id) => (/^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null);
+
     if (host === "youtu.be") {
-      const id = window.location.pathname.split("/").filter(Boolean)[0] || "";
-      return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
+      return valid(window.location.pathname.split("/").filter(Boolean)[0] || "");
     }
 
-    if (!/(^|\.)youtube\.com$/.test(host)) return null;
+    if (!/(^|\.)youtube(?:-nocookie)?\.com$/.test(host)) return null;
 
-    const id = new URLSearchParams(window.location.search).get("v") || "";
-    return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
+    const v = new URLSearchParams(window.location.search).get("v");
+    if (v) return valid(v);
+
+    // Embeds/shorts/live use a path id instead of ?v= (e.g. /embed/<id>). This
+    // lets the resolver handle embedded players instead of falling back to the
+    // sniffed, session-bound googlevideo URL (which 403s).
+    const pathId = (window.location.pathname.match(/\/(?:embed|shorts|live|v)\/([a-zA-Z0-9_-]{11})/) || [])[1];
+    return pathId ? valid(pathId) : null;
   }
 
   // generic hides the real MP4s behind an authorized XHR; the page's bare
