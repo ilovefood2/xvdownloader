@@ -42,9 +42,48 @@ export class DownloadControl {
 }
 
 const SEGMENT_CONCURRENCY = 6;
+const TS_FALLBACK_SEGMENT_LIMIT = 450;
+const TS_FALLBACK_DURATION_LIMIT = 45 * 60;
 
 function resolveUrl(base, ref) {
   return new URL(ref, base).href;
+}
+
+function parseAttributeList(value) {
+  const attrs = {};
+  const re = /([A-Z0-9-]+)=("[^"]*"|[^,]*)/gi;
+  let match;
+  while ((match = re.exec(value))) {
+    let v = (match[2] || "").trim();
+    if (v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1);
+    attrs[match[1].toUpperCase()] = v;
+  }
+  return attrs;
+}
+
+function parseIv(value) {
+  let hex = String(value || "").replace(/^0x/i, "").replace(/[^0-9a-f]/gi, "");
+  if (!hex) return null;
+  if (hex.length % 2) hex = "0" + hex;
+
+  const raw = new Uint8Array(hex.match(/.{2}/g).map((x) => parseInt(x, 16)));
+  const iv = new Uint8Array(16);
+  iv.set(raw.slice(-16), Math.max(0, 16 - raw.length));
+  return iv;
+}
+
+function sequenceIv(sequence) {
+  const iv = new Uint8Array(16);
+  let n = BigInt(Math.max(0, Number(sequence) || 0));
+  for (let i = 15; i >= 0; i--) {
+    iv[i] = Number(n & 0xffn);
+    n >>= 8n;
+  }
+  return iv;
+}
+
+function arrayBufferFromView(view) {
+  return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
 }
 
 // A fetch that aborts if no response arrives within `ms` (cleared once headers
@@ -92,25 +131,89 @@ async function getMediaPlaylist(fetchTimed, masterUrl) {
   return { url: mediaUrl, text: await mr.text() };
 }
 
-/** Parse a media playlist into { mapUrl, segments, encrypted }. */
+/** Parse a media playlist into { mapUrl, segments, encrypted, durationSeconds }. */
 function parseMediaPlaylist(text, baseUrl) {
   const lines = text.split(/\r?\n/);
   let mapUrl = null;
   let encrypted = false;
+  let durationSeconds = 0;
   const segments = [];
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
-    if (line.startsWith("#EXT-X-MAP")) {
+    if (line.startsWith("#EXTINF")) {
+      const value = parseFloat((line.match(/^#EXTINF:([\d.]+)/) || [])[1] || "0");
+      if (Number.isFinite(value)) durationSeconds += value;
+    } else if (line.startsWith("#EXT-X-MAP")) {
       const m = line.match(/URI="([^"]+)"/);
       if (m) mapUrl = resolveUrl(baseUrl, m[1]);
-    } else if (line.startsWith("#EXT-X-KEY") && !/METHOD=NONE/.test(line)) {
+    } else if (line.startsWith("#EXT-X-KEY") && !/METHOD=NONE/i.test(line)) {
       encrypted = true;
     } else if (!line.startsWith("#")) {
       segments.push(resolveUrl(baseUrl, line));
     }
   }
-  return { mapUrl, segments, encrypted };
+  return { mapUrl, segments, encrypted, durationSeconds };
+}
+
+function parseTsConcatPlan(text, baseUrl) {
+  const lines = text.split(/\r?\n/);
+  const segments = [];
+  let mediaSequence = 0;
+  let segmentIndex = 0;
+  let currentKey = null;
+  let hasMap = false;
+  let hasByteRange = false;
+  let unsupportedEncryption = null;
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+
+    if (line.startsWith("#EXT-X-MAP")) {
+      hasMap = true;
+      continue;
+    }
+
+    if (line.startsWith("#EXT-X-BYTERANGE")) {
+      hasByteRange = true;
+      continue;
+    }
+
+    if (line.startsWith("#EXT-X-MEDIA-SEQUENCE")) {
+      const value = parseInt((line.split(":")[1] || "").trim(), 10);
+      if (Number.isFinite(value)) mediaSequence = value;
+      continue;
+    }
+
+    if (line.startsWith("#EXT-X-KEY")) {
+      const attrs = parseAttributeList(line.slice(line.indexOf(":") + 1));
+      const method = String(attrs.METHOD || "").toUpperCase();
+      if (!method || method === "NONE") {
+        currentKey = null;
+      } else if (method === "AES-128" && attrs.URI) {
+        currentKey = {
+          url: resolveUrl(baseUrl, attrs.URI),
+          iv: parseIv(attrs.IV),
+        };
+      } else {
+        unsupportedEncryption = method || "unknown";
+      }
+      continue;
+    }
+
+    if (line.startsWith("#")) continue;
+
+    const sequence = mediaSequence + segmentIndex;
+    segments.push({
+      url: resolveUrl(baseUrl, line),
+      keyUrl: currentKey && currentKey.url,
+      iv: currentKey && (currentKey.iv || sequenceIv(sequence)),
+    });
+    segmentIndex++;
+  }
+
+  return { segments, hasMap, hasByteRange, unsupportedEncryption };
 }
 
 /** Rewrite a playlist so every URI is a local filename, for ffmpeg's MEMFS. */
@@ -210,7 +313,101 @@ async function assembleConcat(mapUrl, segments, ctx) {
   return { blob: new Blob(parts, { type: "video/mp4" }), ext: "mp4" };
 }
 
-/** Encrypted (AES-128) or MPEG-TS: download into ffmpeg, decrypt/remux → MP4. */
+/** Fetch and cache an AES-128 HLS key for the TS fallback path. */
+async function getAesKey(fetchTimed, keyUrl, cache) {
+  if (!globalThis.crypto || !globalThis.crypto.subtle) {
+    throw new Error("Encrypted HLS requires browser crypto support");
+  }
+
+  if (!cache.has(keyUrl)) {
+    cache.set(
+      keyUrl,
+      (async () => {
+        const r = await fetchTimed(keyUrl, 20000);
+        if (!r.ok) throw new Error("Key HTTP " + r.status);
+        const keyBytes = new Uint8Array(await r.arrayBuffer());
+        if (keyBytes.length !== 16) throw new Error("Invalid AES-128 key");
+        return globalThis.crypto.subtle.importKey(
+          "raw",
+          keyBytes,
+          { name: "AES-CBC" },
+          false,
+          ["decrypt"]
+        );
+      })()
+    );
+  }
+
+  return cache.get(keyUrl);
+}
+
+async function decryptAes128(bytes, cryptoKey, iv) {
+  const plain = await globalThis.crypto.subtle.decrypt(
+    { name: "AES-CBC", iv },
+    cryptoKey,
+    arrayBufferFromView(bytes)
+  );
+  return new Uint8Array(plain);
+}
+
+/** Large generic MPEG-TS HLS fallback: decrypt if needed, then join TS parts. */
+async function assembleTsConcat(media, ctx, reason) {
+  const { fetchTimed, control, onProgress } = ctx;
+  const plan = parseTsConcatPlan(media.text, media.url);
+  if (plan.hasMap) throw new Error("TS fallback cannot handle fragmented MP4 HLS");
+  if (plan.hasByteRange) throw new Error("TS fallback cannot handle byte-range HLS");
+  if (plan.unsupportedEncryption) {
+    throw new Error("Unsupported HLS encryption: " + plan.unsupportedEncryption);
+  }
+  if (!plan.segments.length) throw new Error("No segments in stream");
+
+  const total = plan.segments.length;
+  const parts = new Array(total);
+  const keyCache = new Map();
+  let done = 0;
+
+  if (onProgress) onProgress(0, total);
+  console.log("[XVD] HLS: using TS concat fallback", { total, reason });
+
+  await runWorkers(total, control, async (i) => {
+    const segment = plan.segments[i];
+    const r = await fetchTimed(segment.url, 30000);
+    if (!r.ok) throw new Error("Segment HTTP " + r.status);
+
+    if (segment.keyUrl) {
+      const cryptoKey = await getAesKey(fetchTimed, segment.keyUrl, keyCache);
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      parts[i] = await decryptAes128(bytes, cryptoKey, segment.iv);
+    } else {
+      parts[i] = await r.blob();
+    }
+
+    done++;
+    if (onProgress && (done % 10 === 0 || done === total)) {
+      onProgress(done, total);
+    }
+  });
+
+  console.log("[XVD] HLS: merge complete -> ts");
+  return { blob: new Blob(parts, { type: "video/mp2t" }), ext: "ts" };
+}
+
+function isFfmpegMemoryError(error) {
+  const message = String((error && (error.stack || error.message)) || error || "");
+  return /out of memory|memory access out of bounds|cannot enlarge memory|abort/i.test(
+    message
+  );
+}
+
+function isTsFallbackUnsupportedError(error) {
+  const message = String((error && error.message) || error || "");
+  return (
+    message.startsWith("TS fallback cannot handle") ||
+    message.startsWith("Unsupported HLS encryption")
+  );
+}
+
+/** Encrypted (AES-128) or MPEG-TS: download into ffmpeg, decrypt/remux to MP4. */
 async function assembleWithFfmpeg(media, ctx) {
   const { fetchTimed, control, onProgress } = ctx;
   const { playlist, downloads } = buildLocalPlaylist(media.text, media.url);
@@ -315,9 +512,10 @@ export async function downloadHls(masterUrl, opts = {}) {
   const control = opts.control || new DownloadControl();
   const onProgress = opts.onProgress;
   const fetchTimed = makeFetchTimed(opts.credentials);
+  const allowTsFallback = opts.allowTsFallback === true;
 
   const media = await getMediaPlaylist(fetchTimed, masterUrl);
-  const { mapUrl, segments, encrypted } = parseMediaPlaylist(
+  const { mapUrl, segments, encrypted, durationSeconds } = parseMediaPlaylist(
     media.text,
     media.url
   );
@@ -325,6 +523,29 @@ export async function downloadHls(masterUrl, opts = {}) {
 
   const ctx = { fetchTimed, control, onProgress };
   // Encrypted or MPEG-TS → ffmpeg; plain fragmented-MP4 → fast concat.
-  if (encrypted || !mapUrl) return assembleWithFfmpeg(media, ctx);
+  if (encrypted || !mapUrl) {
+    if (
+      allowTsFallback &&
+      !mapUrl &&
+      (segments.length >= TS_FALLBACK_SEGMENT_LIMIT ||
+        durationSeconds >= TS_FALLBACK_DURATION_LIMIT)
+    ) {
+      try {
+        return await assembleTsConcat(media, ctx, "large-ts-playlist");
+      } catch (e) {
+        if (!isTsFallbackUnsupportedError(e)) throw e;
+        console.warn("[XVD] TS fallback unavailable, trying ffmpeg:", e.message);
+      }
+    }
+
+    try {
+      return await assembleWithFfmpeg(media, ctx);
+    } catch (e) {
+      if (allowTsFallback && !mapUrl && isFfmpegMemoryError(e)) {
+        return assembleTsConcat(media, ctx, "ffmpeg-memory");
+      }
+      throw e;
+    }
+  }
   return assembleConcat(mapUrl, segments, ctx);
 }

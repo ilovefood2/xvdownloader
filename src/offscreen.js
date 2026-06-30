@@ -53,6 +53,7 @@ async function prepare(msg) {
   if (jobId != null) controls.set(jobId, control);
   const onProgress = (done, total) => reportProgress(jobId, done, total);
   const credentials = msg.credentials || "include";
+  const allowTsFallback = msg.allowTsFallback === true;
 
   try {
     let result;
@@ -71,6 +72,7 @@ async function prepare(msg) {
           control,
           onProgress,
           credentials,
+          allowTsFallback,
         });
       }
     } else if (msg.hls) {
@@ -79,6 +81,7 @@ async function prepare(msg) {
         control,
         onProgress,
         credentials,
+        allowTsFallback,
       });
     } else {
       throw new Error("No downloadable video found");

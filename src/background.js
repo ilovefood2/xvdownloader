@@ -193,7 +193,7 @@ async function ensureOffscreen() {
 // Fetch the media in the offscreen document (credentialed, so X's CDN serves
 // restricted/4K videos that it refuses to a plain chrome.downloads request),
 // and get back a blob URL to download. Handles both direct MP4 and HLS.
-async function prepareViaOffscreen(meta, jobId, credentials) {
+async function prepareViaOffscreen(meta, jobId, credentials, options = {}) {
   await ensureOffscreen();
   // No overall timeout here: a download can be paused indefinitely by the user.
   // Per-request timeouts in the offscreen doc still guard against dead requests.
@@ -204,6 +204,7 @@ async function prepareViaOffscreen(meta, jobId, credentials) {
     direct: meta.url || null,
     hls: meta.hls || null,
     credentials,
+    allowTsFallback: options.allowTsFallback === true,
   });
   if (!res || !res.ok) throw new Error((res && res.error) || "Download failed");
   return res; // { ok, blobUrl, ext }
@@ -264,7 +265,8 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
     prepared = await prepareViaOffscreen(
       { url: meta.hls ? null : meta.url, hls: meta.hls || null },
       jobId,
-      "include"
+      "include",
+      { allowTsFallback: true }
     );
   } catch (e) {
     if (!meta.hls || !meta.url) throw e;

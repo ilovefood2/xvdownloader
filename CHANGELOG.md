@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.11.5] - 2026-06-30
+
+### Fixed
+- Generic HLS downloads now avoid the browser FFmpeg remux path for long
+  MPEG-TS playlists, preventing the common 99% `ffmpeg-core.js` out-of-memory
+  failure.
+- Added a generic-site TS fallback that can decrypt AES-128 HLS segments in the
+  browser and save the full stream as `.ts` when MP4 remuxing would exceed
+  Chrome's memory limit.
+- Kept the X.com HLS/FFmpeg path unchanged; the TS fallback is only enabled for
+  generic website downloads.
+
 ## [1.11.4] - 2026-06-30
 
 ### Added
