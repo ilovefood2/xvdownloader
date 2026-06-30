@@ -106,13 +106,32 @@
     if (!msg || msg.type !== "XVD_PROGRESS") return;
     const btn = jobButtons.get(msg.requestId);
     if (!btn || btn.dataset.state !== "busy") return;
+    if (!msg.total) return;
+    const pct = Math.min(99, Math.floor((msg.done / msg.total) * 100));
+    btn.xvdPct = pct; // remember for pause/resume labels
+    renderProgress(btn);
+  });
+
+  // Render the busy-state label, reflecting pause and latest percentage.
+  function renderProgress(btn) {
     const label = btn.querySelector(".xvd-label");
     if (!label) return;
-    if (msg.total) {
-      const pct = Math.min(99, Math.floor((msg.done / msg.total) * 100));
-      label.textContent = pct + "%";
-    }
-  });
+    if (btn.xvdPct == null) return; // still "Fetching…" (no segments yet)
+    label.textContent = btn.xvdPaused ? "▶ " + btn.xvdPct + "%" : btn.xvdPct + "%";
+  }
+
+  // Pause/resume an in-progress (HLS) download by clicking the busy button.
+  function togglePause(btn) {
+    if (btn.xvdPct == null || !btn.xvdRequestId) return; // nothing pausable yet
+    btn.xvdPaused = !btn.xvdPaused;
+    btn.classList.toggle("xvd-paused", btn.xvdPaused);
+    btn.title = btn.xvdPaused ? "Resume download" : "Pause download";
+    chrome.runtime.sendMessage({
+      type: btn.xvdPaused ? "XVD_PAUSE" : "XVD_RESUME",
+      requestId: btn.xvdRequestId,
+    });
+    renderProgress(btn);
+  }
 
   async function handleClick(videoEl, btn) {
     if (btn.dataset.state === "busy") return;
@@ -125,6 +144,10 @@
 
     const requestId = "xvd-" + ++requestSeq + "-" + Date.now();
     jobButtons.set(requestId, btn);
+    btn.xvdRequestId = requestId;
+    btn.xvdPct = null;
+    btn.xvdPaused = false;
+    btn.classList.remove("xvd-paused");
     setButtonState(btn, "busy", "Fetching…");
     try {
       const cached = mediaCache.get(ref.id);
@@ -151,6 +174,10 @@
       setTimeout(() => setButtonState(btn, "idle", "Download"), 3500);
     } finally {
       jobButtons.delete(requestId);
+      btn.xvdRequestId = null;
+      btn.xvdPaused = false;
+      btn.classList.remove("xvd-paused");
+      btn.title = "Download this video";
     }
   }
 
@@ -182,7 +209,9 @@
     btn.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      handleClick(videoEl, btn);
+      // While a download is running, the button acts as pause/resume.
+      if (btn.dataset.state === "busy") togglePause(btn);
+      else handleClick(videoEl, btn);
     });
   }
 

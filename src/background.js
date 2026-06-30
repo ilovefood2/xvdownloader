@@ -195,19 +195,15 @@ async function ensureOffscreen() {
 // and get back a blob URL to download. Handles both direct MP4 and HLS.
 async function prepareViaOffscreen(meta, jobId) {
   await ensureOffscreen();
-  const ask = chrome.runtime.sendMessage({
+  // No overall timeout here: a download can be paused indefinitely by the user.
+  // Per-request timeouts in the offscreen doc still guard against dead requests.
+  const res = await chrome.runtime.sendMessage({
     type: "XVD_PREPARE",
     target: "offscreen",
     jobId,
     direct: meta.url || null,
     hls: meta.hls || null,
   });
-  // Safety net: if the offscreen document dies (e.g. out of memory on a huge
-  // stream), don't leave the button spinning forever.
-  const timeout = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error("Timed out preparing video")), 8 * 60_000)
-  );
-  const res = await Promise.race([ask, timeout]);
   if (!res || !res.ok) throw new Error((res && res.error) || "Download failed");
   return res; // { ok, blobUrl, ext }
 }
@@ -272,6 +268,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           total: msg.total,
         })
         .catch(() => {});
+    }
+    return false;
+  }
+
+  // Pause/resume from a button → look up the job and relay to the offscreen doc.
+  if (msg && (msg.type === "XVD_PAUSE" || msg.type === "XVD_RESUME")) {
+    for (const [jobId, job] of jobs) {
+      if (job.requestId === msg.requestId) {
+        chrome.runtime
+          .sendMessage({ type: msg.type, target: "offscreen", jobId })
+          .catch(() => {});
+        break;
+      }
     }
     return false;
   }

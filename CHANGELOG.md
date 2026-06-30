@@ -3,6 +3,14 @@
 All notable changes to X Video Downloader are recorded here. The version here
 matches the `version` field in `manifest.json`.
 
+## [1.7.0] - 2026-06-30
+
+### Added
+- Pause / resume for in-progress HLS downloads. While a download shows a
+  percentage, click the button to pause (it shows "▶ NN%"); click again to
+  resume. The removed overall timeout means a download can stay paused
+  indefinitely.
+
 ## [1.6.0] - 2026-06-30
 
 ### Added

@@ -59,6 +59,16 @@
   background: #f4212e;
 }
 
+/* Paused download: stop the spinner and show the button is clickable. */
+.xvd-download-btn.xvd-paused {
+  background: #b26a00;
+  cursor: pointer;
+}
+
+.xvd-download-btn.xvd-paused .xvd-icon {
+  animation: none;
+}
+
 @keyframes xvd-spin {
   to {
     transform: rotate(360deg);

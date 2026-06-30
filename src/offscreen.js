@@ -35,11 +35,45 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return false;
   }
 
+  if (msg.type === "XVD_PAUSE") {
+    getControl(msg.jobId).paused = true;
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg.type === "XVD_RESUME") {
+    const c = getControl(msg.jobId);
+    c.paused = false;
+    c.waiters.splice(0).forEach((resolve) => resolve());
+    sendResponse({ ok: true });
+    return false;
+  }
+
   return false;
 });
 
 function hlsError(e) {
   return (e && e.message) || "HLS merge failed";
+}
+
+// Per-job pause control for in-progress HLS downloads.
+const controls = new Map(); // jobId -> { paused, waiters: [] }
+
+function getControl(jobId) {
+  let c = controls.get(jobId);
+  if (!c) {
+    c = { paused: false, waiters: [] };
+    controls.set(jobId, c);
+  }
+  return c;
+}
+
+/** Block here while the job is paused; resolve when resumed. */
+async function waitWhilePaused(jobId) {
+  if (jobId == null) return;
+  const c = getControl(jobId);
+  if (!c.paused) return;
+  await new Promise((resolve) => c.waiters.push(resolve));
 }
 
 function resolveUrl(base, ref) {
@@ -184,6 +218,7 @@ async function assemble(masterUrl, jobId) {
   reportProgress(jobId, 0, urls.length);
   async function worker() {
     while (next < urls.length) {
+      await waitWhilePaused(jobId);
       const i = next++;
       parts[i] = await fetchSegmentBlob(urls[i]);
       done++;
@@ -199,7 +234,11 @@ async function assemble(masterUrl, jobId) {
     { length: Math.min(SEGMENT_CONCURRENCY, urls.length) },
     worker
   );
-  await Promise.all(workers);
+  try {
+    await Promise.all(workers);
+  } finally {
+    controls.delete(jobId);
+  }
 
   const ext = mapUrl ? "mp4" : "ts";
   const type = ext === "mp4" ? "video/mp4" : "video/mp2t";
