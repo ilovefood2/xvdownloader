@@ -253,25 +253,38 @@ async function startDownload(meta, tweetId, jobId) {
 }
 
 async function startGenericDownload(meta, requestedFilename, jobId) {
-  if (!meta.url && !meta.hls) throw new Error("No downloadable video found");
+  const source = { url: meta.url || null, hls: meta.hls || null };
+
+  if (meta.youtubeVideoId) {
+    try {
+      console.log("[XVD] resolving YouTube media", meta.youtubeVideoId);
+      source.url = await resolveYouTubeProgressiveMp4(meta.youtubeVideoId);
+      source.hls = null;
+    } catch (e) {
+      console.warn("[XVD] YouTube resolver failed:", e.message);
+      if (!source.url && !source.hls) throw e;
+    }
+  }
+
+  if (!source.url && !source.hls) throw new Error("No downloadable video found");
 
   console.log("[XVD] preparing generic media", {
-    via: meta.hls ? "hls" : "direct",
-    src: meta.hls || meta.url,
+    via: source.hls ? "hls" : "direct",
+    src: source.hls || source.url,
   });
 
   let prepared;
   try {
     prepared = await prepareViaOffscreen(
-      { url: meta.hls ? null : meta.url, hls: meta.hls || null },
+      { url: source.hls ? null : source.url, hls: source.hls || null },
       jobId,
       "include",
       { allowTsFallback: true }
     );
   } catch (e) {
-    if (!meta.hls || !meta.url) throw e;
+    if (!source.hls || !source.url) throw e;
     console.log("[XVD] generic HLS failed, falling back to direct media:", e.message);
-    prepared = await prepareViaOffscreen({ url: meta.url, hls: null }, jobId, "include");
+    prepared = await prepareViaOffscreen({ url: source.url, hls: null }, jobId, "include");
   }
 
   const filename = buildGenericFilename(requestedFilename, prepared.ext);
@@ -372,6 +385,163 @@ function buildGenericFilename(requestedFilename, ext) {
   return `${base}.${extension}`;
 }
 
+const YT_ANDROID_VR_CLIENT = {
+  clientName: "ANDROID_VR",
+  clientVersion: "1.65.10",
+  deviceMake: "Oculus",
+  deviceModel: "Quest 3",
+  androidSdkVersion: 32,
+  userAgent:
+    "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+  osName: "Android",
+  osVersion: "12L",
+  hl: "en",
+  timeZone: "UTC",
+  utcOffsetMinutes: 0,
+};
+
+function sanitizeYouTubeVideoId(value) {
+  const id = String(value || "").trim();
+  return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
+}
+
+function decodeYouTubeString(value) {
+  try {
+    return JSON.parse(`"${String(value).replace(/"/g, '\\"')}"`);
+  } catch {
+    return String(value || "").replace(/\\\//g, "/");
+  }
+}
+
+function extractYouTubeConfigValue(text, key) {
+  const match = text.match(new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`));
+  return match ? decodeYouTubeString(match[1]) : "";
+}
+
+function extractYouTubePlayerPath(text) {
+  const jsUrl = extractYouTubeConfigValue(text, "jsUrl");
+  if (jsUrl) return jsUrl;
+
+  const playerUrl = extractYouTubeConfigValue(text, "PLAYER_JS_URL");
+  if (playerUrl) return playerUrl;
+
+  const match = text.match(/\/s\/player\/[^"']+\/base\.js/);
+  return match ? decodeYouTubeString(match[0]) : "";
+}
+
+function extractSignatureTimestamp(text) {
+  const match =
+    text.match(/signatureTimestamp["']?\s*[:=]\s*(\d+)/) ||
+    text.match(/sts["']?\s*[:=]\s*(\d+)/);
+  const value = parseInt((match && match[1]) || "0", 10);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+async function fetchYouTubeSignatureTimestamp(watchHtml) {
+  const inlineValue = extractSignatureTimestamp(watchHtml);
+  if (inlineValue) return inlineValue;
+
+  const playerPath = extractYouTubePlayerPath(watchHtml);
+  if (!playerPath) return 0;
+
+  const playerUrl = new URL(playerPath, "https://www.youtube.com").href;
+  const response = await fetch(playerUrl, {
+    credentials: "include",
+    cache: "no-store",
+  });
+  if (!response.ok) return 0;
+
+  return extractSignatureTimestamp(await response.text());
+}
+
+function pickYouTubeProgressiveMp4(playerResponse) {
+  const formats = playerResponse?.streamingData?.formats || [];
+  const mp4s = formats
+    .filter(
+      (format) =>
+        format?.url &&
+        /video\/mp4/i.test(format.mimeType || "") &&
+        format.audioQuality
+    )
+    .sort(
+      (a, b) =>
+        (Number(b.height) || 0) - (Number(a.height) || 0) ||
+        (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0)
+    );
+
+  return mp4s[0] || null;
+}
+
+async function resolveYouTubeProgressiveMp4(videoId) {
+  const id = sanitizeYouTubeVideoId(videoId);
+  if (!id) throw new Error("Invalid YouTube video id");
+
+  const watchUrl =
+    "https://www.youtube.com/watch?v=" +
+    encodeURIComponent(id) +
+    "&bpctr=9999999999&has_verified=1";
+  const watchResponse = await fetch(watchUrl, {
+    credentials: "include",
+    cache: "no-store",
+    headers: {
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+  });
+  if (!watchResponse.ok) throw new Error("YouTube watch HTTP " + watchResponse.status);
+
+  const watchHtml = await watchResponse.text();
+  const visitorData =
+    extractYouTubeConfigValue(watchHtml, "VISITOR_DATA") ||
+    extractYouTubeConfigValue(watchHtml, "visitorData");
+  const signatureTimestamp = await fetchYouTubeSignatureTimestamp(watchHtml);
+
+  const headers = {
+    "Content-Type": "application/json",
+    "X-Youtube-Client-Name": "28",
+    "X-Youtube-Client-Version": YT_ANDROID_VR_CLIENT.clientVersion,
+  };
+  if (visitorData) headers["X-Goog-Visitor-Id"] = visitorData;
+
+  const playerResponse = await fetch(
+    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+    {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      headers,
+      body: JSON.stringify({
+        context: { client: YT_ANDROID_VR_CLIENT },
+        videoId: id,
+        playbackContext: {
+          contentPlaybackContext: {
+            html5Preference: "HTML5_PREF_WANTS",
+            ...(signatureTimestamp
+              ? { signatureTimestamp }
+              : {}),
+          },
+        },
+        contentCheckOk: true,
+        racyCheckOk: true,
+      }),
+    }
+  );
+  if (!playerResponse.ok) {
+    throw new Error("YouTube player HTTP " + playerResponse.status);
+  }
+
+  const data = await playerResponse.json();
+  if (data?.playabilityStatus?.status && data.playabilityStatus.status !== "OK") {
+    throw new Error(
+      data.playabilityStatus.reason ||
+        "YouTube player status " + data.playabilityStatus.status
+    );
+  }
+
+  const best = pickYouTubeProgressiveMp4(data);
+  if (!best) throw new Error("No downloadable YouTube MP4 found");
+  return best.url;
+}
+
 // Active jobs, so segment-progress from the offscreen doc can be forwarded to
 // the tab/button that started the download.
 let jobSeq = 0;
@@ -425,7 +595,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       try {
         const url = await startGenericDownload(
-          { url: direct, hls },
+          {
+            url: direct,
+            hls,
+            youtubeVideoId: sanitizeYouTubeVideoId(msg.youtubeVideoId),
+          },
           msg.filename,
           jobId
         );

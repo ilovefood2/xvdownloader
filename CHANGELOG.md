@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.11.6] - 2026-06-30
+
+### Fixed
+- Fixed YouTube downloads that failed because raw `ytInitialPlayerResponse`
+  MP4 URLs were rejected by YouTube.
+- Added a YouTube-specific resolver that uses the page visitor context and
+  Android VR player client to get a downloadable progressive MP4 URL without
+  executing remote player JavaScript.
+
 ## [1.11.5] - 2026-06-30
 
 ### Fixed

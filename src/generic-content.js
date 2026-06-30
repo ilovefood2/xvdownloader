@@ -349,9 +349,23 @@
     return cleaned;
   }
 
+  function getYouTubeVideoId() {
+    const host = window.location.hostname.toLowerCase();
+    if (host === "youtu.be") {
+      const id = window.location.pathname.split("/").filter(Boolean)[0] || "";
+      return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
+    }
+
+    if (!/(^|\.)youtube\.com$/.test(host)) return null;
+
+    const id = new URLSearchParams(window.location.search).get("v") || "";
+    return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
+  }
+
   async function handleDownload(video) {
     const { direct, hls } = getLatestMediaUrls(video);
-    if (!direct && !hls) {
+    const youtubeVideoId = getYouTubeVideoId();
+    if (!direct && !hls && !youtubeVideoId) {
       showTemporaryState("No media found", "error", 2400);
       return;
     }
@@ -369,6 +383,7 @@
         requestId,
         direct,
         hls,
+        youtubeVideoId,
         filename: getDownloadFilename(video),
       });
 
