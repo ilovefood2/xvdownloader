@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.11.19] - 2026-06-30
+
+### Added
+- Facebook: prefer the full progressive MP4 (`browser_native_hd_url` /
+  `playable_url`) extracted from Facebook's GraphQL responses, instead of the
+  audio-only / session-bound DASH segment URLs the generic matcher was grabbing
+  (which 403 on re-fetch). Best-effort — videos Facebook serves as DASH only may
+  still need separate audio+video muxing.
+
 ## [1.11.18] - 2026-06-30
 
 ### Changed

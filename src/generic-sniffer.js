@@ -130,7 +130,29 @@
     for (const match of normalized.matchAll(patterns.hls)) {
       rememberUrl(match[0]);
     }
+    collectFacebookProgressiveUrls(normalized);
     collectYouTubePlayerUrls(normalized);
+  }
+
+  // Facebook serves DASH (separate audio/video) whose segment URLs are
+  // session-bound and useless to re-fetch. It also exposes full progressive
+  // MP4s under these keys in its GraphQL payloads — extract those and remember
+  // them last so they win over the DASH segments the generic matcher grabs.
+  function collectFacebookProgressiveUrls(text) {
+    if (text.indexOf("fbcdn.net") === -1) return;
+    const keys = [
+      "browser_native_hd_url",
+      "browser_native_sd_url",
+      "playable_url_quality_hd",
+      "playable_url",
+    ];
+    for (const key of keys) {
+      const re = new RegExp('"' + key + '"\\s*:\\s*"(https://[^"\\\\]+)"', "g");
+      let match;
+      while ((match = re.exec(text))) {
+        rememberUrl(match[1], "mp4");
+      }
+    }
   }
 
   function collectYouTubePlayerUrls(text) {
