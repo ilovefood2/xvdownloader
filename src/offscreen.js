@@ -64,7 +64,19 @@ async function fetchBuffer(url) {
 
 /** Decide what to fetch (direct MP4 or HLS) and return a downloadable blob. */
 async function prepare(msg) {
-  if (msg.direct) return prepareDirect(msg.direct);
+  if (msg.direct) {
+    try {
+      return await prepareDirect(msg.direct);
+    } catch (e) {
+      // X sometimes 503s / 403s the progressive MP4 even though the HLS
+      // stream of the same video serves fine. Fall back to it.
+      if (msg.hls) {
+        console.log("[XVD] direct MP4 failed, falling back to HLS:", hlsError(e));
+        return assemble(msg.hls);
+      }
+      throw e;
+    }
+  }
   if (msg.hls) return assemble(msg.hls);
   throw new Error("No downloadable video found");
 }

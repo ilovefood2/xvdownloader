@@ -3,6 +3,15 @@
 All notable changes to X Video Downloader are recorded here. The version here
 matches the `version` field in `manifest.json`.
 
+## [1.5.0] - 2026-06-30
+
+### Fixed
+- Automatic HLS fallback when the direct MP4 fails. Some videos (e.g. certain
+  4K tweets) return HTTP 503/403 on their progressive MP4 even though the HLS
+  stream of the same video serves fine. The extension now keeps the HLS
+  playlist alongside the MP4 and, if the MP4 download fails, transparently
+  downloads and merges the HLS stream instead.
+
 ## [1.4.0] - 2026-06-30
 
 ### Fixed

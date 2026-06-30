@@ -82,16 +82,16 @@ function getHls(variants) {
   return m ? m.url : null;
 }
 
-/** Pick the best MP4 across video lists, with an HLS playlist as fallback. */
+/** Pick the best MP4 and the HLS playlist (kept so HLS can serve as fallback). */
 function pickSource(lists, index) {
   const chosen = lists[Math.min(index || 0, lists.length - 1)];
   let mp4 = bestMp4(chosen);
   for (let i = 0; !mp4 && i < lists.length; i++) mp4 = bestMp4(lists[i]);
-  if (mp4) return { url: mp4, hls: null };
 
   let hls = getHls(chosen);
   for (let i = 0; !hls && i < lists.length; i++) hls = getHls(lists[i]);
-  return { url: null, hls: hls || null };
+
+  return { url: mp4 || null, hls: hls || null };
 }
 
 async function resolveVideoUrl(tweetId, index) {
