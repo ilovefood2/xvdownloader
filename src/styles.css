@@ -1,0 +1,66 @@
+/* X Video Downloader — button styling */
+
+.xvd-btn-wrap {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2147483646;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  pointer-events: none;
+}
+
+.xvd-btn-wrap.xvd-visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.xvd-download-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font: 600 13px/1 "Segoe UI", system-ui, -apple-system, sans-serif;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+  transition: background 0.12s ease;
+}
+
+.xvd-download-btn:hover {
+  background: #1d9bf0;
+}
+
+.xvd-download-btn .xvd-icon {
+  flex: none;
+}
+
+.xvd-download-btn.xvd-busy {
+  background: rgba(0, 0, 0, 0.82);
+  cursor: progress;
+}
+
+.xvd-download-btn.xvd-busy .xvd-icon {
+  animation: xvd-spin 0.9s linear infinite;
+}
+
+.xvd-download-btn.xvd-done {
+  background: #00ba7c;
+}
+
+.xvd-download-btn.xvd-error {
+  background: #f4212e;
+}
+
+@keyframes xvd-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
