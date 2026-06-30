@@ -524,22 +524,22 @@
   }
 
   async function resolveAuthorizedXhrMediaUrl() {
-    const host = window.location.hostname.toLowerCase();
-    if (!/(^|\.)generic\.com$/.test(host)) return null;
-
-    const vid = (window.location.pathname.match(/\/(?:video-|hd-porn\/|embed\/)(\w+)/) || [])[1];
-    if (!vid) return null;
-
+    // Detect the scheme structurally (player-config hash + video id) rather than
+    // by hostname, so no specific site is named. Sites that lack these markers
+    // simply return null.
     const html = document.documentElement ? document.documentElement.innerHTML : "";
-    const rawHash =
-      (html.match(/EP\.video\.player\.hash\s*=\s*['"]([0-9a-f]{32})['"]/i) || [])[1] ||
-      (html.match(/\bhash\s*[:=]\s*['"]([0-9a-f]{32})['"]/i) || [])[1];
+    const rawHash = (html.match(/\.player\.hash\s*=\s*['"]([0-9a-f]{32})['"]/i) || [])[1];
     const apiHash = rawHash && authorizedXhrHash(rawHash);
     if (!apiHash) return null;
 
+    const vid =
+      (html.match(/\.player\.vid\s*=\s*['"](\w+)['"]/i) || [])[1] ||
+      (window.location.pathname.match(/\/(?:video-|embed\/)(\w+)/) || [])[1];
+    if (!vid) return null;
+
     const params = new URLSearchParams({
       hash: apiHash,
-      domain: host,
+      domain: window.location.hostname,
       fallback: "false",
       embed: "false",
       supportedFormats: "dash,hls,mp4",

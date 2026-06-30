@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.32] - 2026-06-30
+
+### Changed
+- The authorized-XHR resolver now detects its scheme structurally (player-config
+  hash + video id markers) instead of by hostname, so it carries no specific
+  site name. Behavior on supported pages is unchanged.
+
 ## [1.11.31] - 2026-06-30
 
 ### Changed
