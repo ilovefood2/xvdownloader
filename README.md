@@ -42,3 +42,7 @@ No login, API keys, or third-party servers are involved.
 - The downloaded file is named `x_<tweetId>_<resolution>.mp4`.
 - This extension is for downloading content you have the rights to. Respect
   copyright and X's Terms of Service.
+
+## Privacy
+
+The extension collects no data. See the [Privacy Policy](PRIVACY.md).

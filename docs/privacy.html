@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Privacy Policy — X Video Downloader</title>
+    <meta
+      name="description"
+      content="Privacy policy for the X Video Downloader Chrome extension."
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 40px 20px 80px;
+        font: 16px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+        color: #14171a;
+        background: #fff;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          color: #e7e9ea;
+          background: #15202b;
+        }
+        a {
+          color: #1d9bf0;
+        }
+        th,
+        td {
+          border-color: #38444d;
+        }
+      }
+      h1 {
+        font-size: 28px;
+      }
+      h2 {
+        margin-top: 32px;
+        font-size: 20px;
+      }
+      .updated {
+        color: #657786;
+        font-size: 14px;
+      }
+      a {
+        color: #1d9bf0;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 12px 0;
+      }
+      th,
+      td {
+        border: 1px solid #ccd6dd;
+        padding: 8px 12px;
+        text-align: left;
+        vertical-align: top;
+      }
+      code {
+        background: rgba(127, 127, 127, 0.18);
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 0.92em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Privacy Policy — X Video Downloader</h1>
+    <p class="updated">Last updated: June 30, 2026</p>
+
+    <p>
+      X Video Downloader ("the extension") is a browser extension that lets you
+      download videos from tweets on x.com / twitter.com. Your privacy matters,
+      and this policy explains exactly what the extension does and does not do
+      with data.
+    </p>
+
+    <h2>Summary</h2>
+    <p>
+      <strong
+        >The extension does not collect, store, transmit, or sell any personal
+        information.</strong
+      >
+      There are no analytics, no tracking, no accounts, and no third-party
+      servers operated by us.
+    </p>
+
+    <h2>What the extension does</h2>
+    <ul>
+      <li>
+        Runs a content script on <code>x.com</code> and
+        <code>twitter.com</code> that detects videos in tweets and shows a
+        <strong>Download</strong> button when you hover over a video.
+      </li>
+      <li>
+        When you click <strong>Download</strong>, it reads the tweet's public
+        status id from the page and requests the video's direct MP4 link from
+        X's own public endpoint (<code>cdn.syndication.twimg.com</code>).
+      </li>
+      <li>
+        Saves the resulting MP4 file to your computer using the browser's
+        standard download feature.
+      </li>
+    </ul>
+    <p>
+      All of this happens locally in your browser and only in response to your
+      click.
+    </p>
+
+    <h2>Data collection</h2>
+    <p>The extension collects <strong>no data</strong>. Specifically:</p>
+    <ul>
+      <li>
+        It does <strong>not</strong> collect personally identifiable
+        information, browsing history, credentials, or analytics.
+      </li>
+      <li>
+        It does <strong>not</strong> send any data to servers operated by the
+        developer (there are none).
+      </li>
+      <li>
+        It does <strong>not</strong> use cookies or persistent identifiers for
+        tracking.
+      </li>
+    </ul>
+
+    <h2>Network requests</h2>
+    <p>
+      The only network request the extension initiates is to X's public
+      syndication endpoint (<code>https://cdn.syndication.twimg.com</code>) to
+      resolve the direct video URL for the tweet you chose, and the subsequent
+      download of the video file itself from X's media servers
+      (<code>https://video.twimg.com</code>). These requests go directly between
+      your browser and X's servers and are subject to
+      <a href="https://twitter.com/en/privacy">X's Privacy Policy</a>.
+    </p>
+
+    <h2>Permissions</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Permission</th>
+          <th>Why it is needed</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>downloads</code></td>
+          <td>To save the selected video file to your device.</td>
+        </tr>
+        <tr>
+          <td>Host access to <code>x.com</code> / <code>twitter.com</code></td>
+          <td>To show the download button on tweets.</td>
+        </tr>
+        <tr>
+          <td>
+            Host access to <code>cdn.syndication.twimg.com</code> /
+            <code>video.twimg.com</code>
+          </td>
+          <td>To resolve and fetch the video file.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      The extension requests no other permissions and does not run on any other
+      websites.
+    </p>
+
+    <h2>Data sharing and sale</h2>
+    <p>
+      We do not share, sell, rent, or trade any data, because we do not collect
+      any.
+    </p>
+
+    <h2>Children's privacy</h2>
+    <p>
+      The extension is not directed at children and collects no data from
+      anyone.
+    </p>
+
+    <h2>Changes to this policy</h2>
+    <p>
+      If this policy changes, the updated version will be published in this
+      repository with a new "Last updated" date.
+    </p>
+
+    <h2>Contact</h2>
+    <p>
+      For questions about this privacy policy, contact:
+      <a href="mailto:ikelca@gmail.com">ikelca@gmail.com</a>
+    </p>
+  </body>
+</html>
