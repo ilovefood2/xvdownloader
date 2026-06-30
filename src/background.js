@@ -7,6 +7,39 @@
  */
 "use strict";
 
+// YouTube's InnerTube player endpoint (youtubei/v1/player) returns HTTP 403 to
+// any request that carries an Origin header — and Chrome forces an
+// `Origin: chrome-extension://<id>` header onto every fetch the service worker
+// makes (it's a forbidden header, so it can't be removed from fetch() itself).
+// Strip it via declarativeNetRequest, scoped to the player endpoint and excluded
+// for youtube.com-initiated requests so the user's own YouTube playback is
+// untouched. (googlevideo media fetches are fine with the Origin header.)
+const YT_ORIGIN_RULE_ID = 4801;
+async function ensureYouTubeOriginRule() {
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [YT_ORIGIN_RULE_ID],
+      addRules: [
+        {
+          id: YT_ORIGIN_RULE_ID,
+          priority: 1,
+          action: {
+            type: "modifyHeaders",
+            requestHeaders: [{ header: "origin", operation: "remove" }],
+          },
+          condition: {
+            urlFilter: "||youtube.com/youtubei/v1/player",
+            excludedInitiatorDomains: ["youtube.com"],
+          },
+        },
+      ],
+    });
+  } catch (e) {
+    console.warn("[XVD] could not register YouTube origin rule:", e.message);
+  }
+}
+ensureYouTubeOriginRule();
+
 /**
  * Token expected by the syndication endpoint. Derived purely from the tweet id
  * (same algorithm the X web widget uses).
@@ -366,6 +399,9 @@ function isHttpHlsUrl(url) {
 
   try {
     const parsed = new URL(url);
+    if (/(^|\.)youtube\.com$/i.test(parsed.hostname) || parsed.hostname === "youtu.be") {
+      return false; // YouTube media is resolved via the video id, not as HLS.
+    }
     return (
       (parsed.protocol === "https:" || parsed.protocol === "http:") &&
       (/\.m3u8(?:[/?#]|$)/i.test(parsed.pathname + parsed.search) ||

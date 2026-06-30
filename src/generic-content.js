@@ -97,6 +97,11 @@
   }
 
   function isLikelyHlsEndpoint(parsed) {
+    // YouTube media is resolved via the video id, not generic sniffing. Without
+    // this guard a YouTube `/playlist?list=...` page URL is mistaken for HLS.
+    if (/(^|\.)youtube\.com$/i.test(parsed.hostname) || parsed.hostname === "youtu.be") {
+      return false;
+    }
     const path = parsed.pathname.toLowerCase();
     return (
       /(?:^|\/)(?:master)?playlist(?:\/|$)/i.test(path) ||

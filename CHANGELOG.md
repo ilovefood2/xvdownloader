@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.11.8] - 2026-06-30
+
+### Fixed
+- Fixed YouTube downloads still failing with "YouTube player HTTP 403". Chrome
+  forces an `Origin: chrome-extension://…` header onto every request the service
+  worker makes, and YouTube's player API rejects it. The extension now strips
+  that header for the player endpoint via a `declarativeNetRequest` rule (scoped
+  so the user's own YouTube playback is unaffected).
+- Stopped treating YouTube `/playlist?list=…` page URLs as HLS streams, which
+  produced a misleading "preparing HLS" fallback that could never succeed.
+
+### Notes
+- Adds the `declarativeNetRequestWithHostAccess` permission, used only to remove
+  the Origin header from YouTube player API requests.
+
 ## [1.11.7] - 2026-06-30
 
 ### Fixed
