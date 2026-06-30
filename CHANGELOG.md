@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.11.20] - 2026-06-30
+
+### Added
+- Facebook DASH support. Facebook serves separate video + audio streams whose
+  bare URLs 403; byte ranges must be in the URL (`&bytestart=&byteend=`), not a
+  Range header. The content script now groups the sniffed `*.fbcdn.net` streams
+  by `video_id` (decoded from the `efg` param), picks the best video + its
+  audio, requests each as a full-range URL via a plain GET (no Range header,
+  with the page Referer and no Origin), and muxes them with FFmpeg.
+- The muxer (`downloadMux`) and direct downloader now detect byte-range URLs and
+  fetch them plainly instead of adding a conflicting Range header.
+
+### Notes
+- Picks the most-buffered video on the page, which is the right one on a single
+  video page; on a multi-video feed it may pick the wrong one — open the video
+  on its own page and let it play briefly before downloading.
+
 ## [1.11.19] - 2026-06-30
 
 ### Added

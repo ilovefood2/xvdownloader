@@ -597,11 +597,17 @@ async function downloadStreamChunked(url, total, { credentials, control, onProgr
 // download that errors falls back to a plain GET, so this is never worse than a
 // single request. Rejects HTML error pages served in place of media.
 async function downloadStream(url, { credentials, control, onProgress } = {}) {
+  // Facebook-style URLs carry the byte range in the query (&bytestart=&byteend=);
+  // adding a Range header conflicts and the CDN 403s — fetch them plainly.
+  const urlHasByteRange = /[?&]byteend=/.test(url);
+
   let probe = null;
-  try {
-    probe = await probeStreamSize(url, credentials);
-  } catch (e) {
-    probe = null; // some CDNs reject a range probe but serve a plain GET fine
+  if (!urlHasByteRange) {
+    try {
+      probe = await probeStreamSize(url, credentials);
+    } catch (e) {
+      probe = null; // some CDNs reject a range probe but serve a plain GET fine
+    }
   }
 
   if (probe && /text\/html/i.test(probe.contentType)) {
@@ -630,23 +636,12 @@ async function downloadStream(url, { credentials, control, onProgress } = {}) {
  * formats) and mux them into a single MP4 with ffmpeg (stream copy, no re-encode).
  */
 export async function downloadMux(videoUrl, audioUrl, { credentials, control, onProgress } = {}) {
-  // Probe both sizes up front for a combined progress bar.
-  const videoProbe = await probeStreamSize(videoUrl, credentials);
-  const audioProbe = await probeStreamSize(audioUrl, credentials);
-  const grandTotal = videoProbe.total + audioProbe.total;
-  let completed = 0;
-  const trackProgress =
-    onProgress && grandTotal
-      ? (done) => onProgress(Math.min(completed + done, grandTotal), grandTotal)
-      : undefined;
-
-  const videoBlob = videoProbe.chunkable
-    ? await downloadStreamChunked(videoUrl, videoProbe.total, { credentials, control, onProgress: trackProgress })
-    : await downloadStream(videoUrl, { credentials, control, onProgress: trackProgress });
-  completed = videoProbe.total;
-  const audioBlob = audioProbe.chunkable
-    ? await downloadStreamChunked(audioUrl, audioProbe.total, { credentials, control, onProgress: trackProgress })
-    : await downloadStream(audioUrl, { credentials, control, onProgress: trackProgress });
+  // Each stream goes through downloadStream, which chunks via Range when the
+  // server supports it (YouTube) and falls back to a plain GET for byte-range
+  // URLs (Facebook). The video dominates the size, so drive the progress bar
+  // off it and let the small audio stream finish quietly.
+  const videoBlob = await downloadStream(videoUrl, { credentials, control, onProgress });
+  const audioBlob = await downloadStream(audioUrl, { credentials, control });
 
   await control?.gate();
   const ff = await getFfmpeg();

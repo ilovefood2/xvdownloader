@@ -360,6 +360,81 @@
     return cleaned;
   }
 
+  // Facebook serves DASH: separate video + audio streams on *.fbcdn.net, keyed
+  // by video_id inside the base64 `efg` URL param. The bare URL is rejected —
+  // byte ranges must be in the URL (&bytestart=&byteend=), not a Range header.
+  // Group the sniffed streams, pick the best video + its audio, and return a
+  // mux pair with a full-range URL for each.
+  function decodeFacebookEfg(url) {
+    const match = url.match(/[?&]efg=([^&]+)/);
+    if (!match) return null;
+    try {
+      const b64 = decodeURIComponent(match[1]).replace(/-/g, "+").replace(/_/g, "/");
+      return JSON.parse(atob(b64));
+    } catch {
+      return null;
+    }
+  }
+
+  function facebookFullRangeUrl(url) {
+    try {
+      const u = new URL(url);
+      u.searchParams.delete("bytestart");
+      u.searchParams.delete("byteend");
+      u.searchParams.set("bytestart", "0");
+      u.searchParams.set("byteend", "2000000000");
+      return u.href;
+    } catch {
+      return null;
+    }
+  }
+
+  function resolveFacebookMedia() {
+    const host = window.location.hostname.toLowerCase();
+    if (!/(^|\.)facebook\.com$/.test(host)) return null;
+
+    collectSnifferCache();
+    const groups = {};
+    for (const url of mediaUrls.mp4) {
+      if (!/(^|\.)fbcdn\.net$/i.test(safeHost(url))) continue;
+      const efg = decodeFacebookEfg(url);
+      if (!efg || !efg.video_id) continue;
+      const tag = String(efg.vencode_tag || "");
+      const group = (groups[efg.video_id] = groups[efg.video_id] || { video: [], audio: [] });
+      if (/audio/i.test(tag)) {
+        group.audio.push({ url });
+      } else {
+        // Rank by resolution (e.g. _1080p) first, then encoder quality (_q90).
+        const res = parseInt((tag.match(/(\d+)p/) || [])[1] || "0", 10);
+        const q = parseInt((tag.match(/_q(\d+)/) || [])[1] || "0", 10);
+        group.video.push({ url, quality: res * 1000 + q });
+      }
+    }
+
+    // The main video has the most fetched segments and both stream types.
+    let best = null;
+    for (const id of Object.keys(groups)) {
+      const g = groups[id];
+      if (!g.video.length || !g.audio.length) continue;
+      const score = g.video.length + g.audio.length;
+      if (!best || score > best.score) best = { ...g, score };
+    }
+    if (!best) return null;
+
+    const video = best.video.sort((a, b) => b.quality - a.quality)[0];
+    const videoUrl = facebookFullRangeUrl(video.url);
+    const audioUrl = facebookFullRangeUrl(best.audio[0].url);
+    return videoUrl && audioUrl ? { videoUrl, audioUrl } : null;
+  }
+
+  function safeHost(url) {
+    try {
+      return new URL(url).hostname;
+    } catch {
+      return "";
+    }
+  }
+
   // TikTok embeds the (no-watermark) MP4 URL in a page JSON blob rather than a
   // <video src>, and the URL has no .mp4 extension, so generic sniffing misses
   // it. Read it directly and pick the highest-bitrate variant.
@@ -476,6 +551,7 @@
   async function handleDownload(video) {
     let { direct, hls } = getLatestMediaUrls(video);
     const youtubeVideoId = getYouTubeVideoId();
+    let mux = null;
 
     // generic's authorized URL overrides anything sniffed (its bare page link 403s).
     try {
@@ -488,7 +564,19 @@
       /* fall through to whatever was sniffed */
     }
 
-    if (!direct && !hls && !youtubeVideoId) {
+    // Facebook is DASH: build a video+audio mux pair from the sniffed streams.
+    try {
+      const facebook = resolveFacebookMedia();
+      if (facebook) {
+        mux = facebook;
+        direct = null;
+        hls = null;
+      }
+    } catch (e) {
+      /* fall through */
+    }
+
+    if (!direct && !hls && !youtubeVideoId && !mux) {
       showTemporaryState("No media found", "error", 2400);
       return;
     }
@@ -507,6 +595,7 @@
         direct,
         hls,
         youtubeVideoId,
+        mux,
         filename: getDownloadFilename(video),
       });
 

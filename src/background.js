@@ -370,7 +370,7 @@ async function startDownload(meta, tweetId, jobId) {
 }
 
 async function startGenericDownload(meta, requestedFilename, jobId) {
-  const source = { url: meta.url || null, hls: meta.hls || null, mux: null };
+  const source = { url: meta.url || null, hls: meta.hls || null, mux: meta.mux || null };
   // Most sites need cookies for restricted streams; YouTube's signed googlevideo
   // URLs are issued for an anonymous context and break if cookies are attached.
   let credentials = "include";
@@ -402,7 +402,12 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
   // Referer-gated, so spoof the page Referer/Origin for our fetches.
   const refererActive =
     !meta.youtubeVideoId && meta.pageUrl
-      ? await setMediaRefererRule(jobId, meta.pageUrl, [source.hls, source.url])
+      ? await setMediaRefererRule(jobId, meta.pageUrl, [
+          source.hls,
+          source.url,
+          source.mux && source.mux.videoUrl,
+          source.mux && source.mux.audioUrl,
+        ])
       : false;
 
   try {
@@ -463,6 +468,16 @@ function isHttpMediaUrl(url, extPattern) {
       (parsed.protocol === "https:" || parsed.protocol === "http:") &&
       extPattern.test(parsed.pathname + parsed.search)
     );
+  } catch {
+    return false;
+  }
+}
+
+function isHttpUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
   } catch {
     return false;
   }
@@ -817,6 +832,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const direct = isHttpMp4Url(msg.direct) ? msg.direct : null;
       const hls = isHttpHlsUrl(msg.hls) ? msg.hls : null;
+      const mux =
+        msg.mux && isHttpUrl(msg.mux.videoUrl) && isHttpUrl(msg.mux.audioUrl)
+          ? { videoUrl: msg.mux.videoUrl, audioUrl: msg.mux.audioUrl }
+          : null;
 
       const jobId = ++jobSeq;
       jobs.set(jobId, {
@@ -829,6 +848,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           {
             url: direct,
             hls,
+            mux,
             youtubeVideoId: sanitizeYouTubeVideoId(msg.youtubeVideoId),
             pageUrl: (sender && sender.url) || msg.pageUrl || null,
           },
