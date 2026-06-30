@@ -22,6 +22,10 @@ Click it to save the video as an MP4.
   streams become a real `.mp4` with no re-encoding. The button shows a live
   **download percentage** while this happens; **click it to pause/resume**, or
   use the **✕** to cancel.
+- For **encrypted (AES-128) or MPEG-TS** streams, a bundled **ffmpeg.wasm**
+  (lazy-loaded, ~31 MB) decrypts/remuxes into a clean MP4. Real DRM
+  (Widevine/PlayReady/FairPlay) is not supported — those keys are never
+  exposed to any downloader.
 
 No login, API keys, or third-party servers are involved.
 
@@ -40,6 +44,7 @@ No login, API keys, or third-party servers are involved.
 | `src/inject.js` | Reads X's API responses to capture video URLs (page context) |
 | `src/content.js` | Detects videos, renders the hover button |
 | `src/offscreen.html` / `offscreen.js` | Merges HLS segments into a downloadable file |
+| `vendor/ffmpeg/` | Bundled ffmpeg.wasm (lazy-loaded for encrypted / TS streams) |
 | `src/background.js` | Resolves the MP4 URL and triggers the download |
 | `src/styles.css` | Button styling |
 | `icons/` | Toolbar / store icons |

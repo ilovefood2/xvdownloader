@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.9.0] - 2026-06-30
+
+### Added
+- Bundled `ffmpeg.wasm` (~31 MB) for full HLS parity. Encrypted (AES-128
+  clear-key) streams and MPEG-TS streams are now downloaded and handed to ffmpeg
+  for decryption / remuxing into a clean MP4. ffmpeg is **lazy-loaded only when
+  needed** — X's normal unencrypted fragmented-MP4 videos still use the
+  lightweight concat path and never load it. Pause/resume/cancel work on the
+  ffmpeg path too. Does not (and cannot) handle real DRM (Widevine/PlayReady/
+  FairPlay).
+
 All notable changes to X Video Downloader are recorded here. The version here
 matches the `version` field in `manifest.json`.
 

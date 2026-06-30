@@ -93,6 +93,69 @@ function resolveUrl(base, ref) {
   return new URL(ref, base).href;
 }
 
+// --- ffmpeg.wasm (lazy) ---------------------------------------------------
+// Loaded only for streams the lightweight concat path can't handle: encrypted
+// (AES-128) or MPEG-TS that needs remuxing to a clean MP4. ~31 MB, so we never
+// load it for X's normal unencrypted fragmented-MP4 videos.
+let ffmpegPromise = null;
+
+function getFfmpeg() {
+  if (!ffmpegPromise) {
+    ffmpegPromise = (async () => {
+      console.log("[XVD] ffmpeg: loading core (~31 MB)…");
+      const mod = await import(chrome.runtime.getURL("vendor/ffmpeg/index.js"));
+      const ff = new mod.FFmpeg();
+      await ff.load({
+        coreURL: chrome.runtime.getURL("vendor/ffmpeg/core/ffmpeg-core.js"),
+        wasmURL: chrome.runtime.getURL("vendor/ffmpeg/core/ffmpeg-core.wasm"),
+      });
+      console.log("[XVD] ffmpeg: core ready");
+      return ff;
+    })().catch((e) => {
+      ffmpegPromise = null; // allow a retry on a later download
+      throw e;
+    });
+  }
+  return ffmpegPromise;
+}
+
+// Rewrite a media playlist so every segment/key/map URI points at a local file
+// (for ffmpeg's MEMFS), and collect the remote URLs to download.
+function buildLocalPlaylist(text, baseUrl) {
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  const downloads = []; // { url, name }
+  let segIdx = 0;
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) {
+      out.push(raw);
+    } else if (line.startsWith("#EXT-X-MAP")) {
+      const m = line.match(/URI="([^"]+)"/);
+      if (m) {
+        downloads.push({ url: resolveUrl(baseUrl, m[1]), name: "init.mp4" });
+        out.push(line.replace(/URI="[^"]+"/, 'URI="init.mp4"'));
+      } else out.push(line);
+    } else if (line.startsWith("#EXT-X-KEY")) {
+      const m = line.match(/URI="([^"]+)"/);
+      if (m && !/METHOD=NONE/i.test(line)) {
+        downloads.push({ url: resolveUrl(baseUrl, m[1]), name: "enc.key" });
+        out.push(line.replace(/URI="[^"]+"/, 'URI="enc.key"'));
+      } else out.push(line);
+    } else if (line.startsWith("#")) {
+      out.push(line);
+    } else {
+      const url = resolveUrl(baseUrl, line);
+      const ext = (url.split("?")[0].match(/\.([a-z0-9]+)$/i) || [, "ts"])[1];
+      const name = "seg" + segIdx++ + "." + ext;
+      downloads.push({ url, name });
+      out.push(name);
+    }
+  }
+  return { playlist: out.join("\n"), downloads };
+}
+
 // Credentialed so X's CDN serves restricted/4K media that it refuses to a
 // plain chrome.downloads request. Host permissions grant the cross-origin read.
 const FETCH_OPTS = { credentials: "include", cache: "no-store" };
@@ -217,10 +280,15 @@ async function assemble(masterUrl, jobId) {
     media.url
   );
 
-  if (encrypted) throw new Error("Encrypted HLS not supported");
   if (!segments.length) throw new Error("No segments in stream");
 
-  const urls = mapUrl ? [mapUrl, ...segments] : segments;
+  // Encrypted (AES-128) or MPEG-TS streams go through ffmpeg for decryption /
+  // remuxing. Unencrypted fragmented-MP4 (the X case) uses the fast concat path.
+  if (encrypted || !mapUrl) {
+    return assembleWithFfmpeg(media, jobId);
+  }
+
+  const urls = [mapUrl, ...segments];
   // Hold each segment as a Blob (browser may back it on disk) rather than
   // keeping every ArrayBuffer in the JS heap — important for long/4K streams.
   const parts = new Array(urls.length);
@@ -271,9 +339,80 @@ async function assemble(masterUrl, jobId) {
   const failed = results.find((r) => r.status === "rejected");
   if (failed) throw failed.reason;
 
-  const ext = mapUrl ? "mp4" : "ts";
-  const type = ext === "mp4" ? "video/mp4" : "video/mp2t";
+  const type = "video/mp4";
   const blobUrl = URL.createObjectURL(new Blob(parts, { type }));
-  console.log("[XVD] HLS: merge complete →", ext);
-  return { ok: true, blobUrl, ext };
+  console.log("[XVD] HLS: merge complete → mp4");
+  return { ok: true, blobUrl, ext: "mp4" };
+}
+
+// Download every segment/key into ffmpeg's in-memory FS, then let ffmpeg
+// decrypt (AES-128) and remux into a clean MP4. Supports pause/cancel.
+async function assembleWithFfmpeg(media, jobId) {
+  const { playlist, downloads } = buildLocalPlaylist(media.text, media.url);
+  if (!downloads.length) throw new Error("No segments in stream");
+
+  const control = jobId != null ? getControl(jobId) : freshControl();
+  async function gate() {
+    if (control.canceled) throw new CanceledError();
+    if (control.paused) await new Promise((r) => control.waiters.push(r));
+    if (control.canceled) throw new CanceledError();
+  }
+
+  const ff = await getFfmpeg();
+  const total = downloads.length;
+  console.log("[XVD] ffmpeg: downloading", total, "files");
+
+  let next = 0;
+  let done = 0;
+  reportProgress(jobId, 0, total);
+  async function worker() {
+    while (next < downloads.length) {
+      await gate();
+      const i = next++;
+      const r = await fetchTimed(downloads[i].url, 30000);
+      if (!r.ok) throw new Error("Segment HTTP " + r.status);
+      await ff.writeFile(downloads[i].name, new Uint8Array(await r.arrayBuffer()));
+      done++;
+      if (done % 10 === 0 || done === total) reportProgress(jobId, done, total);
+      if (done % 25 === 0 || done === total) {
+        console.log("[XVD] ffmpeg:", done + "/" + total, "files");
+      }
+    }
+  }
+  const results = await Promise.allSettled(
+    Array.from({ length: Math.min(SEGMENT_CONCURRENCY, downloads.length) }, worker)
+  );
+  if (jobId != null) controls.delete(jobId);
+  if (control.canceled) {
+    console.log("[XVD] ffmpeg: canceled");
+    throw new CanceledError();
+  }
+  const failed = results.find((r) => r.status === "rejected");
+  if (failed) throw failed.reason;
+
+  await ff.writeFile("playlist.m3u8", new TextEncoder().encode(playlist));
+  console.log("[XVD] ffmpeg: remuxing…");
+  await ff.exec([
+    "-allowed_extensions", "ALL",
+    "-protocol_whitelist", "file,crypto,data",
+    "-i", "playlist.m3u8",
+    "-c", "copy",
+    "-movflags", "+faststart",
+    "out.mp4",
+  ]);
+
+  const out = await ff.readFile("out.mp4"); // Uint8Array
+  // Free the MEMFS so memory isn't held for the next download.
+  try {
+    for (const d of downloads) await ff.deleteFile(d.name);
+    await ff.deleteFile("playlist.m3u8");
+    await ff.deleteFile("out.mp4");
+  } catch (e) {
+    /* ignore cleanup errors */
+  }
+  if (!out || !out.length) throw new Error("ffmpeg produced no output");
+
+  const blobUrl = URL.createObjectURL(new Blob([out], { type: "video/mp4" }));
+  console.log("[XVD] ffmpeg: done → mp4");
+  return { ok: true, blobUrl, ext: "mp4" };
 }
