@@ -305,6 +305,33 @@ function isHttpMediaUrl(url, extPattern) {
   }
 }
 
+function isHttpMp4Url(url) {
+  if (!url || typeof url !== "string") return false;
+  if (url.startsWith("blob:") || url.startsWith("data:")) return false;
+
+  try {
+    const parsed = new URL(url);
+    return (
+      (parsed.protocol === "https:" || parsed.protocol === "http:") &&
+      (/\.mp4(?:[/?#]|$)/i.test(parsed.pathname + parsed.search) ||
+        isYouTubeProgressiveMp4(parsed))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isYouTubeProgressiveMp4(parsed) {
+  const itag = parsed.searchParams.get("itag") || "";
+  const mime = parsed.searchParams.get("mime") || "";
+  return (
+    /(^|\.)googlevideo\.com$/i.test(parsed.hostname) &&
+    /\/videoplayback$/i.test(parsed.pathname) &&
+    /video\/mp4/i.test(mime) &&
+    /^(18|22)$/i.test(itag)
+  );
+}
+
 function isHttpHlsUrl(url) {
   if (!url || typeof url !== "string") return false;
   if (url.startsWith("blob:") || url.startsWith("data:")) return false;
@@ -385,7 +412,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg && msg.type === "XVD_GENERIC_DOWNLOAD") {
     (async () => {
-      const direct = isHttpMediaUrl(msg.direct, /\.mp4(?:[/?#]|$)/i) ? msg.direct : null;
+      const direct = isHttpMp4Url(msg.direct) ? msg.direct : null;
       const hls = isHttpHlsUrl(msg.hls) ? msg.hls : null;
 
       const jobId = ++jobSeq;

@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.11.4] - 2026-06-30
+
+### Added
+- Added YouTube progressive MP4 support by reading `ytInitialPlayerResponse`
+  and accepting signed `googlevideo.com/videoplayback` MP4 URLs.
+
+### Notes
+- YouTube 720p/1080p+ adaptive formats are usually separate video-only and
+  audio-only tracks and are not merged yet. This version downloads progressive
+  MP4 formats when YouTube exposes them, typically 360p/720p depending on the
+  video.
+
 ## [1.11.3] - 2026-06-30
 
 ### Fixed

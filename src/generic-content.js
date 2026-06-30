@@ -19,6 +19,7 @@
   const seenVideos = new WeakSet();
   const mediaUrls = { mp4: [], hls: [] };
   let staticMediaScanned = false;
+  let mediaPageUrl = window.location.href;
   let activeVideo = null;
   let hideTimer = null;
   let lastPointer = { x: 0, y: 0 };
@@ -85,6 +86,7 @@
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
       const path = parsed.pathname + parsed.search;
       if (/\.mp4(?:[/?#]|$)/i.test(path)) return "mp4";
+      if (isYouTubeProgressiveMp4(parsed)) return "mp4";
       if (/\.m3u8(?:[/?#]|$)/i.test(path)) return "hls";
       if (isLikelyHlsEndpoint(parsed)) return "hls";
     } catch {
@@ -103,7 +105,20 @@
     );
   }
 
+  function isYouTubeProgressiveMp4(parsed) {
+    const itag = parsed.searchParams.get("itag") || "";
+    const mime = parsed.searchParams.get("mime") || "";
+    return (
+      /(^|\.)googlevideo\.com$/i.test(parsed.hostname) &&
+      /\/videoplayback$/i.test(parsed.pathname) &&
+      /video\/mp4/i.test(mime) &&
+      /^(18|22)$/i.test(itag)
+    );
+  }
+
   function rememberMediaUrl(url, forcedKind) {
+    resetMediaIfNavigated();
+
     const kind = forcedKind || mediaKind(url);
     if (!kind || !mediaUrls[kind]) return;
 
@@ -119,11 +134,14 @@
   }
 
   function collectSnifferCache() {
+    resetMediaIfNavigated();
+
     const rawCache = document.documentElement?.dataset?.[CACHE_ATTR];
     if (!rawCache) return;
 
     try {
       const cached = JSON.parse(rawCache);
+      if (cached?.pageUrl && cached.pageUrl !== window.location.href) return;
       if (Array.isArray(cached?.mp4)) {
         cached.mp4.forEach((url) => rememberMediaUrl(url, "mp4"));
       }
@@ -143,6 +161,8 @@
   }
 
   function collectStaticPageMediaUrls() {
+    resetMediaIfNavigated();
+
     if (staticMediaScanned) return;
     staticMediaScanned = true;
 
@@ -192,6 +212,82 @@
       rememberMediaUrl(match[0], "hls");
     }
     rememberMediaUrl(text);
+    collectYouTubePlayerUrls(text);
+  }
+
+  function collectYouTubePlayerUrls(text) {
+    if (!/youtube\.com|ytInitialPlayerResponse|googlevideo\.com/i.test(text)) return;
+
+    let index = text.indexOf("ytInitialPlayerResponse");
+    while (index !== -1) {
+      const start = text.indexOf("{", index);
+      if (start === -1) return;
+      const parsed = parseJsonObjectAt(text, start);
+      if (parsed) {
+        rememberYouTubeFormats(parsed.value);
+        index = parsed.end;
+      } else {
+        index = start + 1;
+      }
+      index = text.indexOf("ytInitialPlayerResponse", index);
+    }
+
+    try {
+      rememberYouTubeFormats(JSON.parse(text));
+    } catch {
+      // Most snippets are not standalone JSON.
+    }
+  }
+
+  function parseJsonObjectAt(text, start) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === "\\") {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+      } else if (ch === "{") {
+        depth++;
+      } else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            return { value: JSON.parse(text.slice(start, i + 1)), end: i + 1 };
+          } catch {
+            return null;
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function rememberYouTubeFormats(playerResponse) {
+    const streamingData = playerResponse?.streamingData;
+    if (!streamingData) return;
+
+    const progressiveMp4s = (streamingData.formats || [])
+      .filter((format) => format?.url && /video\/mp4/i.test(format.mimeType || ""))
+      .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0));
+
+    for (const format of progressiveMp4s) {
+      rememberMediaUrl(format.url, "mp4");
+    }
   }
 
   function getMediaUrlFromElement(video) {
@@ -208,6 +304,8 @@
   }
 
   function getLatestMediaUrls(video) {
+    resetMediaIfNavigated();
+
     collectSnifferCache();
     collectPerformanceMediaUrls();
     collectStaticPageMediaUrls();
@@ -219,6 +317,15 @@
       direct: hls ? null : direct,
       hls,
     };
+  }
+
+  function resetMediaIfNavigated() {
+    if (mediaPageUrl === window.location.href) return;
+
+    mediaPageUrl = window.location.href;
+    mediaUrls.mp4.length = 0;
+    mediaUrls.hls.length = 0;
+    staticMediaScanned = false;
   }
 
   function getDownloadFilename(video) {
