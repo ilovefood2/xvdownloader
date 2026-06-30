@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.11.14] - 2026-06-30
+
+### Changed
+- Large 4K / long YouTube videos now remux in-browser. The muxer mounts the
+  downloaded video + audio via FFmpeg's WORKERFS, so FFmpeg reads them lazily
+  from the Blobs instead of copying them into its 2 GB heap. Only the muxed
+  output occupies the heap now, which roughly doubles the size that can be
+  merged (video ceiling raised from ~650 MB to ~1.25 GB) — enough for true 4K
+  at typical lengths. Streams beyond that (extreme 8K / hours-long 4K) still
+  step down to the highest resolution that fits, with the progressive MP4 as a
+  final fallback.
+- Dropped `+faststart` from the merge (it rewrites the whole file, doubling heap
+  use); a fully-downloaded local MP4 plays fine with the moov atom at the end.
+
 ## [1.11.13] - 2026-06-30
 
 ### Changed

@@ -529,42 +529,67 @@ export async function downloadMux(videoUrl, audioUrl, { credentials, control, on
       ? (done) => onProgress(Math.min(completed + done, grandTotal), grandTotal)
       : undefined;
 
-  const ff = await getFfmpeg();
-
-  // Write each stream into ffmpeg's filesystem and drop the JS copy before
-  // fetching the next, so peak memory stays near one stream — not video +
-  // audio + output at once. This is what lets large (4K) videos remux under
-  // ffmpeg.wasm's 2 GB heap.
-  let videoBlob = await readBlobWithProgress(videoResponse, { control, onProgress: trackProgress });
-  await ff.writeFile("mux_v.mp4", new Uint8Array(await videoBlob.arrayBuffer()));
-  videoBlob = null;
+  const videoBlob = await readBlobWithProgress(videoResponse, { control, onProgress: trackProgress });
   completed = videoTotal;
-
-  let audioBlob = await readBlobWithProgress(audioResponse, { control, onProgress: trackProgress });
-  await ff.writeFile("mux_a.m4a", new Uint8Array(await audioBlob.arrayBuffer()));
-  audioBlob = null;
+  const audioBlob = await readBlobWithProgress(audioResponse, { control, onProgress: trackProgress });
 
   await control?.gate();
-  console.log("[XVD] ffmpeg: muxing video + audio…");
-  await ff.exec([
-    "-i", "mux_v.mp4",
-    "-i", "mux_a.m4a",
-    "-c", "copy",
-    "-movflags", "+faststart",
-    "mux_out.mp4",
-  ]);
-  const out = await ff.readFile("mux_out.mp4");
+  const ff = await getFfmpeg();
+
+  // Mount the streams via WORKERFS so ffmpeg reads them lazily from the Blobs
+  // instead of copying them into its 2 GB heap. Only the muxed output then
+  // occupies the heap (not input + output), which roughly doubles the size of
+  // video that can be remuxed in-browser — enough for large 4K files.
+  const MOUNT = "/mux";
   try {
-    await ff.deleteFile("mux_v.mp4");
-    await ff.deleteFile("mux_a.m4a");
-    await ff.deleteFile("mux_out.mp4");
+    await ff.createDir(MOUNT);
   } catch (e) {
-    /* ignore cleanup errors */
+    /* directory may already exist from a previous run */
   }
-  if (!out || !out.length) throw new Error("ffmpeg produced no output");
-  if (onProgress && grandTotal) onProgress(grandTotal, grandTotal);
-  console.log("[XVD] ffmpeg: mux done → mp4");
-  return { blob: new Blob([out], { type: "video/mp4" }), ext: "mp4" };
+  await ff.mount(
+    "WORKERFS",
+    {
+      blobs: [
+        { name: "v.mp4", data: videoBlob },
+        { name: "a.m4a", data: audioBlob },
+      ],
+    },
+    MOUNT
+  );
+
+  console.log("[XVD] ffmpeg: muxing video + audio…");
+  try {
+    // No -movflags +faststart: relocating the moov atom rewrites the whole file
+    // and would double the heap usage, defeating the WORKERFS memory savings. A
+    // moov-at-end MP4 plays fine for a fully-downloaded local file.
+    await ff.exec([
+      "-i", `${MOUNT}/v.mp4`,
+      "-i", `${MOUNT}/a.m4a`,
+      "-c", "copy",
+      "mux_out.mp4",
+    ]);
+    const out = await ff.readFile("mux_out.mp4");
+    if (!out || !out.length) throw new Error("ffmpeg produced no output");
+    if (onProgress && grandTotal) onProgress(grandTotal, grandTotal);
+    console.log("[XVD] ffmpeg: mux done → mp4");
+    return { blob: new Blob([out], { type: "video/mp4" }), ext: "mp4" };
+  } finally {
+    try {
+      await ff.unmount(MOUNT);
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      await ff.deleteDir(MOUNT);
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      await ff.deleteFile("mux_out.mp4");
+    } catch (e) {
+      /* ignore */
+    }
+  }
 }
 
 /** Download + assemble an HLS stream into a single MP4 Blob. */
