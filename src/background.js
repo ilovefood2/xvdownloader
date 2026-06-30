@@ -75,13 +75,42 @@ async function resolveVideoUrl(tweetId, index) {
   const chosen = videos[Math.min(index || 0, videos.length - 1)];
   const mp4 = bestMp4(chosen) || bestMp4(videos[0]);
   if (!mp4) throw new Error("No MP4 variant");
-  return mp4;
+
+  return {
+    url: mp4,
+    text: typeof data.text === "string" ? data.text : "",
+    author: (data.user && data.user.screen_name) || "",
+  };
 }
 
-function buildFilename(tweetId, mp4Url) {
-  // Keep the resolution suffix (e.g. 1280x720) when X provides it.
-  const res = (mp4Url.match(/\/(\d+x\d+)\//) || [])[1];
-  const base = res ? `x_${tweetId}_${res}` : `x_${tweetId}`;
+/** Turn arbitrary tweet text into a safe, readable filename fragment. */
+function sanitizeName(s) {
+  return (s || "")
+    .replace(/https?:\/\/\S+/g, " ") // drop t.co / other links
+    .replace(/[@#]/g, "") // drop handle/hashtag sigils
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/[\\/:*?"<>|]/g, "") // characters illegal in filenames
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "")
+    .replace(/&gt;/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildFilename(meta, tweetId) {
+  const author = sanitizeName(meta.author);
+  let title = sanitizeName(meta.text);
+  if (title.length > 80) title = title.slice(0, 80).trim();
+
+  // Prefer "author - tweet text"; fall back gracefully when text is empty.
+  let base = [author, title].filter(Boolean).join(" - ");
+  if (!base) base = `x_${tweetId}`;
+
+  // Append the tweet id so names stay unique across similar tweets.
+  base = `${base} (${tweetId})`;
+
+  // Guard against an over-long path component.
+  if (base.length > 150) base = base.slice(0, 150).trim();
   return `${base}.mp4`;
 }
 
@@ -90,13 +119,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   (async () => {
     try {
-      const mp4 = await resolveVideoUrl(msg.tweetId, msg.index);
+      const meta = await resolveVideoUrl(msg.tweetId, msg.index);
       await chrome.downloads.download({
-        url: mp4,
-        filename: buildFilename(msg.tweetId, mp4),
+        url: meta.url,
+        filename: buildFilename(meta, msg.tweetId),
         saveAs: false,
       });
-      sendResponse({ ok: true, url: mp4 });
+      sendResponse({ ok: true, url: meta.url });
     } catch (e) {
       sendResponse({ ok: false, error: (e && e.message) || "Error" });
     }

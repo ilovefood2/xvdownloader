@@ -39,7 +39,9 @@ No login, API keys, or third-party servers are involved.
   aren't accessible to the syndication endpoint may not resolve.
 - For tweets containing multiple videos, the button maps to the hovered video
   by its position within the tweet.
-- The downloaded file is named `x_<tweetId>_<resolution>.mp4`.
+- The downloaded file is named after the tweet:
+  `<author> - <tweet text> (<tweetId>).mp4` (text is sanitized and truncated;
+  it falls back to `x_<tweetId>.mp4` for videos with no caption).
 - This extension is for downloading content you have the rights to. Respect
   copyright and X's Terms of Service.
 
