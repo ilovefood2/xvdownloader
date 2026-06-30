@@ -421,6 +421,18 @@
       }
     }
 
+    const fbAll = mediaUrls.mp4.filter((u) => /(^|\.)fbcdn\.net$/i.test(safeHost(u)));
+    const fbSigned = fbAll.filter((u) => /[?&]oh=/.test(u) && /[?&]oe=/.test(u));
+    console.log(
+      "[XVD] facebook resolve: fbcdn urls=%d signed=%d groups=%o targetVid=%s",
+      fbAll.length,
+      fbSigned.length,
+      Object.fromEntries(
+        Object.entries(groups).map(([id, g]) => [id, `v${g.video.length}/a${g.audio.length}`])
+      ),
+      facebookPageVideoId()
+    );
+
     const hasBoth = (g) => g && g.video.length && g.audio.length;
 
     // Prefer the video named in the page URL; else the most-buffered one with

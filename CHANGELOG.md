@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.24] - 2026-06-30
+
+### Changed
+- Added a diagnostic log to the Facebook resolver (counts of sniffed fbcdn URLs,
+  how many are signed, the per-video stream groups, and the target video id) to
+  pinpoint why a pair can't be formed.
+
 ## [1.11.23] - 2026-06-30
 
 ### Fixed
