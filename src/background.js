@@ -222,12 +222,18 @@ async function startDownload(meta, tweetId) {
 
   if (!url) {
     if (!meta.hls) throw new Error("No downloadable video found");
+    console.log("[XVD] HLS-only, merging playlist:", meta.hls);
     const merged = await assembleHls(meta.hls);
     url = merged.blobUrl;
     ext = merged.ext || "mp4";
     isBlob = true;
   }
 
+  console.log("[XVD] downloading", {
+    via: isBlob ? "hls-blob" : "direct",
+    ext,
+    url,
+  });
   const filename = buildFilename(meta, tweetId, ext);
   const id = await new Promise((resolve) =>
     chrome.downloads.download({ url, filename, saveAs: false }, resolve)
