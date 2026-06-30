@@ -18,8 +18,8 @@ const SEGMENT_CONCURRENCY = 6;
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.target !== "offscreen") return false;
 
-  if (msg.type === "XVD_HLS") {
-    assemble(msg.url)
+  if (msg.type === "XVD_PREPARE") {
+    prepare(msg)
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: hlsError(e) }));
     return true; // async response
@@ -46,16 +46,42 @@ function resolveUrl(base, ref) {
   return new URL(ref, base).href;
 }
 
+// Credentialed so X's CDN serves restricted/4K media that it refuses to a
+// plain chrome.downloads request. Host permissions grant the cross-origin read.
+const FETCH_OPTS = { credentials: "include", cache: "no-store" };
+
 async function fetchText(url) {
-  const r = await fetch(url);
+  const r = await fetch(url, FETCH_OPTS);
   if (!r.ok) throw new Error("Playlist HTTP " + r.status);
   return r.text();
 }
 
 async function fetchBuffer(url) {
-  const r = await fetch(url);
+  const r = await fetch(url, FETCH_OPTS);
   if (!r.ok) throw new Error("Segment HTTP " + r.status);
   return r.arrayBuffer();
+}
+
+/** Decide what to fetch (direct MP4 or HLS) and return a downloadable blob. */
+async function prepare(msg) {
+  if (msg.direct) return prepareDirect(msg.direct);
+  if (msg.hls) return assemble(msg.hls);
+  throw new Error("No downloadable video found");
+}
+
+/** Fetch a direct MP4 ourselves so credentials/headers reach X's CDN. */
+async function prepareDirect(url) {
+  const r = await fetch(url, FETCH_OPTS);
+  if (!r.ok) throw new Error("Video blocked by X (HTTP " + r.status + ")");
+  const type = r.headers.get("content-type") || "";
+  if (/text\/html/i.test(type)) {
+    throw new Error("Video blocked by X (got a web page, not a video)");
+  }
+  const buf = await r.arrayBuffer();
+  const blobUrl = URL.createObjectURL(
+    new Blob([buf], { type: "video/mp4" })
+  );
+  return { ok: true, blobUrl, ext: "mp4" };
 }
 
 /** Resolve a master playlist to the highest-bandwidth media playlist. */

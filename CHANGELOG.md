@@ -3,6 +3,17 @@
 All notable changes to X Video Downloader are recorded here. The version here
 matches the `version` field in `manifest.json`.
 
+## [1.4.0] - 2026-06-30
+
+### Fixed
+- Downloads that failed with a `.htm` file and "Site wasn't available" (e.g.
+  some 4K or restricted videos). X's CDN refuses these when the browser's
+  download manager requests them directly. The extension now fetches the media
+  bytes from its own (credentialed) context — like the HLS path already did —
+  and saves the resulting blob, so restricted/high-res MP4s download correctly.
+- An HTML/error response from X is now detected and reported as a clear error
+  instead of being silently saved as a `.htm` file.
+
 ## [1.3.0] - 2026-06-30
 
 ### Added

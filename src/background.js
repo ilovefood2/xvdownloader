@@ -190,14 +190,18 @@ async function ensureOffscreen() {
   }
 }
 
-async function assembleHls(masterUrl) {
+// Fetch the media in the offscreen document (credentialed, so X's CDN serves
+// restricted/4K videos that it refuses to a plain chrome.downloads request),
+// and get back a blob URL to download. Handles both direct MP4 and HLS.
+async function prepareViaOffscreen(meta) {
   await ensureOffscreen();
   const res = await chrome.runtime.sendMessage({
-    type: "XVD_HLS",
+    type: "XVD_PREPARE",
     target: "offscreen",
-    url: masterUrl,
+    direct: meta.url || null,
+    hls: meta.hls || null,
   });
-  if (!res || !res.ok) throw new Error((res && res.error) || "HLS merge failed");
+  if (!res || !res.ok) throw new Error((res && res.error) || "Download failed");
   return res; // { ok, blobUrl, ext }
 }
 
@@ -216,27 +220,22 @@ chrome.downloads.onChanged.addListener((delta) => {
 });
 
 async function startDownload(meta, tweetId) {
-  let url = meta.url;
-  let ext = "mp4";
-  let isBlob = false;
+  if (!meta.url && !meta.hls) throw new Error("No downloadable video found");
 
-  if (!url) {
-    if (!meta.hls) throw new Error("No downloadable video found");
-    console.log("[XVD] HLS-only, merging playlist:", meta.hls);
-    const merged = await assembleHls(meta.hls);
-    url = merged.blobUrl;
-    ext = merged.ext || "mp4";
-    isBlob = true;
-  }
-
-  console.log("[XVD] downloading", {
-    via: isBlob ? "hls-blob" : "direct",
-    ext,
-    url,
+  console.log("[XVD] preparing", {
+    via: meta.url ? "direct" : "hls",
+    src: meta.url || meta.hls,
   });
-  const filename = buildFilename(meta, tweetId, ext);
+
+  // Always fetch the bytes from the extension context, then download the blob.
+  const prepared = await prepareViaOffscreen(meta);
+  const filename = buildFilename(meta, tweetId, prepared.ext);
+
   const id = await new Promise((resolve) =>
-    chrome.downloads.download({ url, filename, saveAs: false }, resolve)
+    chrome.downloads.download(
+      { url: prepared.blobUrl, filename, saveAs: false },
+      resolve
+    )
   );
   if (id == null) {
     throw new Error(
@@ -244,8 +243,8 @@ async function startDownload(meta, tweetId) {
         "Download blocked"
     );
   }
-  if (isBlob) pendingRevokes.set(id, url);
-  return url;
+  pendingRevokes.set(id, prepared.blobUrl);
+  return prepared.blobUrl;
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
