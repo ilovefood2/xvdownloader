@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.11.10] - 2026-06-30
+
+### Fixed
+- Fixed generic HLS detection picking up a bogus URL on sites that declare the
+  stream inside an inline script (e.g. a gated site's `var hlsUrl = '…m3u8';…`). The
+  whole script snippet was being resolved as a relative URL and mistaken for the
+  playlist, so the download hit a non-existent path and 403'd. Media detection
+  now rejects candidates that aren't a single clean URL token; the real playlist
+  URL is still recovered via regex extraction. Combined with the v1.11.9 Referer
+  fix, Referer-gated sites like a gated site now download correctly.
+
 ## [1.11.9] - 2026-06-30
 
 ### Fixed

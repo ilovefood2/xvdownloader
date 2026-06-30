@@ -31,6 +31,10 @@
     if (forcedKind === "hls") return "hls";
     if (!url || typeof url !== "string") return null;
     if (url.startsWith("blob:") || url.startsWith("data:")) return null;
+    // A real media URL is a single clean token. Reject script/text blobs that
+    // merely *contain* a URL (those are handled by regex extraction), so a
+    // snippet like `var hlsUrl = '…m3u8';…` isn't resolved into a bogus path.
+    if (url.length > 4096 || /[\s'"<>\\]/.test(url)) return null;
 
     try {
       const parsed = new URL(url, window.location.href);
