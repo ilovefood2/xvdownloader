@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.11.27] - 2026-06-30
+
+### Added
+- Facebook (experimental): intercept the media Web Worker to capture the signed
+  audio/video segment URLs the main-thread hooks can't see. On facebook.com
+  only, Worker is wrapped to inject the same capture into the worker scope and
+  relay URLs back; any failure falls back to a normal Worker so playback is
+  never broken. Re-added a temporary resolver diagnostic to confirm capture.
+
 ## [1.11.26] - 2026-06-30
 
 ### Changed

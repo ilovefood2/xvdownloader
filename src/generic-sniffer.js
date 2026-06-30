@@ -290,4 +290,64 @@
 
     return originalSend.apply(this, args);
   };
+
+  // Facebook fetches DASH audio (and some video) segments inside a Web Worker,
+  // so their signed URLs never reach the main-thread fetch/XHR hooks above. On
+  // Facebook only, wrap Worker to inject the same capture into the worker scope
+  // and relay captured URLs back. Fully defensive: any failure falls back to a
+  // normal Worker so page playback is never broken.
+  hookWorkersForFacebook();
+
+  function hookWorkersForFacebook() {
+    if (!/(^|\.)facebook\.com$/i.test(location.hostname)) return;
+    const NativeWorker = window.Worker;
+    if (typeof NativeWorker !== "function") return;
+
+    const PRELUDE =
+      "(function(){try{" +
+      "var P=function(u){try{self.postMessage({__xvdMedia:String(u)});}catch(e){}};" +
+      "if(typeof fetch==='function'){var F=fetch;self.fetch=function(){try{var a=arguments[0];P(typeof a==='string'?a:(a&&a.url));}catch(e){}return F.apply(this,arguments);};}" +
+      "if(self.XMLHttpRequest){var O=self.XMLHttpRequest.prototype.open;self.XMLHttpRequest.prototype.open=function(m,u){try{P(u);}catch(e){}return O.apply(this,arguments);};}" +
+      "}catch(e){}})();";
+
+    function attach(worker) {
+      try {
+        worker.addEventListener("message", (ev) => {
+          const data = ev && ev.data;
+          if (data && typeof data === "object" && data.__xvdMedia) {
+            rememberUrl(data.__xvdMedia);
+          }
+        });
+      } catch (e) {
+        /* ignore */
+      }
+    }
+
+    function WrappedWorker(scriptURL, options) {
+      try {
+        const isModule = options && options.type === "module";
+        const abs = new URL(scriptURL, location.href);
+        if (!isModule && /^https?:$/.test(abs.protocol)) {
+          const src =
+            PRELUDE + "\ntry{importScripts(" + JSON.stringify(abs.href) + ");}catch(e){}";
+          const blobUrl = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+          const worker = new NativeWorker(blobUrl, options); // throws if CSP blocks blob:
+          attach(worker);
+          return worker;
+        }
+      } catch (e) {
+        // CSP / module / cross-origin — fall back to an untouched worker.
+      }
+      const worker = new NativeWorker(scriptURL, options);
+      attach(worker);
+      return worker;
+    }
+
+    WrappedWorker.prototype = NativeWorker.prototype;
+    try {
+      window.Worker = WrappedWorker;
+    } catch (e) {
+      /* leave the native Worker in place */
+    }
+  }
 })();
