@@ -397,6 +397,9 @@
     const groups = {};
     for (const url of mediaUrls.mp4) {
       if (!/(^|\.)fbcdn\.net$/i.test(safeHost(url))) continue;
+      // Each stream URL must carry its own signature (oh/oe); an unsigned base
+      // URL captured from a manifest 403s with "Bad URL hash".
+      if (!/[?&]oh=/.test(url) || !/[?&]oe=/.test(url)) continue;
       const efg = decodeFacebookEfg(url);
       if (!efg || !efg.video_id) continue;
       const tag = String(efg.vencode_tag || "");

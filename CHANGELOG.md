@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.21] - 2026-06-30
+
+### Fixed
+- Facebook: the video stream downloaded but the audio 403'd with "Bad URL hash"
+  because the sniffer had picked an unsigned audio URL (missing the `oh`/`oe`
+  signature). Only consider fbcdn stream URLs that carry the signature, so both
+  video and audio use properly-signed URLs.
+
 ## [1.11.20] - 2026-06-30
 
 ### Added
