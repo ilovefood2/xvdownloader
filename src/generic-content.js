@@ -410,9 +410,77 @@
     return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
   }
 
+  // generic hides the real MP4s behind an authorized XHR; the page's bare
+  // gvideo .mp4 link 403s. Replicate the player's hash transform (4x 8-hex
+  // chunks -> base36, no padding) and call the API. The returned URL is signed
+  // to the caller's IP, so this must run in the page, not the background.
+  function genericApiHash(hash) {
+    if (!/^[0-9a-f]{32}$/i.test(hash)) return null;
+    let out = "";
+    for (let i = 0; i < 32; i += 8) {
+      out += parseInt(hash.substring(i, i + 8), 16).toString(36);
+    }
+    return out;
+  }
+
+  async function resolveGenericMediaUrl() {
+    const host = window.location.hostname.toLowerCase();
+    if (!/(^|\.)generic\.com$/.test(host)) return null;
+
+    const vid = (window.location.pathname.match(/\/(?:video-|hd-porn\/|embed\/)(\w+)/) || [])[1];
+    if (!vid) return null;
+
+    const html = document.documentElement ? document.documentElement.innerHTML : "";
+    const rawHash =
+      (html.match(/EP\.video\.player\.hash\s*=\s*['"]([0-9a-f]{32})['"]/i) || [])[1] ||
+      (html.match(/\bhash\s*[:=]\s*['"]([0-9a-f]{32})['"]/i) || [])[1];
+    const apiHash = rawHash && genericApiHash(rawHash);
+    if (!apiHash) return null;
+
+    const params = new URLSearchParams({
+      hash: apiHash,
+      domain: host,
+      fallback: "false",
+      embed: "false",
+      supportedFormats: "dash,hls,mp4",
+      _: String(Date.now()),
+    });
+    const response = await fetch(`${window.location.origin}/xhr/video/${vid}?${params}`, {
+      credentials: "include",
+      headers: { "X-Requested-With": "XMLHttpRequest" },
+    });
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const mp4 = (data && data.sources && data.sources.mp4) || {};
+    let best = null;
+    let bestResolution = -1;
+    for (const [label, info] of Object.entries(mp4)) {
+      if (label === "auto" || !info || typeof info.src !== "string") continue;
+      const resolution = parseInt(label, 10) || 0; // "1080p HD" -> 1080
+      if (resolution > bestResolution) {
+        best = info.src;
+        bestResolution = resolution;
+      }
+    }
+    return best && /^https?:\/\//.test(best) ? best : null;
+  }
+
   async function handleDownload(video) {
-    const { direct, hls } = getLatestMediaUrls(video);
+    let { direct, hls } = getLatestMediaUrls(video);
     const youtubeVideoId = getYouTubeVideoId();
+
+    // generic's authorized URL overrides anything sniffed (its bare page link 403s).
+    try {
+      const generic = await resolveGenericMediaUrl();
+      if (generic) {
+        direct = generic;
+        hls = null;
+      }
+    } catch (e) {
+      /* fall through to whatever was sniffed */
+    }
+
     if (!direct && !hls && !youtubeVideoId) {
       showTemporaryState("No media found", "error", 2400);
       return;

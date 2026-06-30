@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.11.16] - 2026-06-30
+
+### Added
+- Added generic support. The page's bare `gvideo` MP4 link 403s; the real
+  per-quality MP4s come from an authorized XHR (`/xhr/video/<id>`) whose hash is
+  derived from the page (four 8-hex-digit chunks → base36). The extension now
+  replicates that, calls the API from the page (the returned URL is signed to
+  the viewer's IP, so it must run there), and downloads the highest quality.
+
 ## [1.11.15] - 2026-06-30
 
 ### Fixed
