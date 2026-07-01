@@ -490,6 +490,78 @@
     }
   }
 
+  // Some sites deliver adaptive media as a DASH manifest embedded in JSON: a
+  // `dash` object with separate video-only and audio-only representations, each
+  // carrying its own full `baseUrl` (typically `.m4s`). No .mp4/.m3u8 URL exists
+  // for the generic sniffer to catch, so those pages report "No media found".
+  // Detect the shape structurally — no hostname — pick the best video + audio,
+  // and hand the pair to the shared mux (video+audio) pipeline.
+  const DASH_ATTR = "xvdDashManifest";
+
+  function readEmbeddedDash() {
+    // Prefer a manifest the MAIN-world sniffer captured from live traffic — it
+    // stays correct after an in-page navigation between videos, when a copy
+    // inlined in the original HTML would be stale.
+    try {
+      const raw = document.documentElement?.dataset?.[DASH_ATTR];
+      if (raw) {
+        const dash = JSON.parse(raw);
+        if (dash && Array.isArray(dash.video) && dash.video.length) return dash;
+      }
+    } catch {
+      // Fall through to the inline scan.
+    }
+
+    for (const script of document.querySelectorAll("script")) {
+      const text = script.textContent || "";
+      let index = text.indexOf('"dash"');
+      while (index !== -1) {
+        const brace = text.indexOf("{", index);
+        if (brace !== -1) {
+          const parsed = parseJsonObjectAt(text, brace);
+          if (parsed?.value && Array.isArray(parsed.value.video) && parsed.value.video.length) {
+            return parsed.value;
+          }
+        }
+        index = text.indexOf('"dash"', index + 6);
+      }
+    }
+
+    return null;
+  }
+
+  function resolveEmbeddedDashMedia() {
+    const dash = readEmbeddedDash();
+    if (!dash) return null;
+
+    const streamUrl = (stream) =>
+      (stream &&
+        (stream.baseUrl ||
+          stream.base_url ||
+          (Array.isArray(stream.backupUrl) && stream.backupUrl[0]) ||
+          (Array.isArray(stream.backup_url) && stream.backup_url[0]))) ||
+      null;
+
+    // Best video: highest resolution, then highest bitrate. Best audio: highest
+    // bitrate. Bandwidth is the one field every DASH representation carries.
+    const video = dash.video
+      .slice()
+      .sort(
+        (a, b) =>
+          (Number(b.height) || 0) - (Number(a.height) || 0) ||
+          (Number(b.bandwidth) || 0) - (Number(a.bandwidth) || 0)
+      )[0];
+    const audio = (Array.isArray(dash.audio) ? dash.audio : [])
+      .slice()
+      .sort((a, b) => (Number(b.bandwidth) || 0) - (Number(a.bandwidth) || 0))[0];
+
+    const videoUrl = streamUrl(video);
+    const audioUrl = streamUrl(audio);
+    if (videoUrl && audioUrl) return { videoUrl, audioUrl };
+
+    return null;
+  }
+
   function getYouTubeVideoId() {
     const host = window.location.hostname.toLowerCase();
     const valid = (id) => (/^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null);
@@ -597,6 +669,21 @@
       }
     } catch (e) {
       /* fall through */
+    }
+
+    // Sites that expose only an embedded DASH manifest (separate video+audio
+    // streams) need those muxed; the generic sniffer finds no .mp4/.m3u8 URL.
+    if (!mux) {
+      try {
+        const dashMux = resolveEmbeddedDashMedia();
+        if (dashMux) {
+          mux = dashMux;
+          direct = null;
+          hls = null;
+        }
+      } catch (e) {
+        /* fall through to whatever was sniffed */
+      }
     }
 
     if (!direct && !hls && !youtubeVideoId && !mux) {

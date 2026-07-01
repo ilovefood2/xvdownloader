@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.11.33] - 2026-07-01
+
+### Added
+- Support for adaptive media delivered as a DASH manifest embedded in JSON — a
+  `dash` object holding separate video-only and audio-only representations, each
+  with its own full `baseUrl` (typically `.m4s`) and no `.mp4`/`.m3u8` URL for
+  the generic sniffer to catch, so such pages reported "No media found". The
+  manifest is now detected structurally (no hostname): the sniffer stashes the
+  freshest one seen in traffic and the content script also scans the page's
+  inline scripts, then picks the best video + audio and muxes them to MP4 via
+  the existing offscreen FFmpeg pipeline.
+
 ## [1.11.32] - 2026-06-30
 
 ### Changed

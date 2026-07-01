@@ -13,6 +13,7 @@
 
   const EVENT_NAME = "xvd-generic-media-url";
   const CACHE_ATTR = "xvdGenericMediaUrls";
+  const DASH_ATTR = "xvdDashManifest";
   const MAX_CACHED_URLS = 300; // DASH sites (Facebook) fire 100+ segment URLs
   const patterns = {
     mp4: /https?:\/\/[^"'\s<>\\]+?\.mp4(?:\/)?(?:[?#][^"'\s<>\\]*)?(?=["'\s<>\\]|$)/gi,
@@ -132,6 +133,49 @@
     }
     collectFacebookProgressiveUrls(normalized);
     collectYouTubePlayerUrls(normalized);
+    collectEmbeddedDashManifest(normalized);
+  }
+
+  // Some sites deliver adaptive media as a DASH manifest embedded in JSON rather
+  // than a .mp4/.m3u8 URL: a `dash` object holding separate video-only and
+  // audio-only representations, each with its own full `baseUrl`. The generic
+  // matcher never sees those stream URLs (they end in .m4s and carry no HLS/MP4
+  // marker). Detect that shape structurally — no hostname — and stash the freshest
+  // manifest so the content script can mux the best video + audio pair. This
+  // captures both the copy inlined in the initial HTML (seen when the page's own
+  // config script is read back through here) and the one refetched from an API on
+  // in-page navigation between videos.
+  function collectEmbeddedDashManifest(text) {
+    if (text.indexOf('"dash"') === -1) return;
+    if (text.indexOf("baseUrl") === -1 && text.indexOf("base_url") === -1) return;
+
+    const dash = findEmbeddedDash(text);
+    if (!dash) return;
+
+    try {
+      const root = document.documentElement;
+      if (root) root.dataset[DASH_ATTR] = JSON.stringify(dash);
+    } catch {
+      // Some pages restrict DOM writes; the inline-scan path still works.
+    }
+  }
+
+  // Locate a `"dash": { … }` value and return the parsed object when it holds a
+  // video representation list. Scans every occurrence so a stray `dash` string
+  // earlier in the payload doesn't stop the real manifest being found.
+  function findEmbeddedDash(text) {
+    let index = text.indexOf('"dash"');
+    while (index !== -1) {
+      const brace = text.indexOf("{", index);
+      if (brace !== -1) {
+        const parsed = parseJsonObjectAt(text, brace);
+        if (parsed && parsed.value && Array.isArray(parsed.value.video)) {
+          return parsed.value;
+        }
+      }
+      index = text.indexOf('"dash"', index + 6);
+    }
+    return null;
   }
 
   // Facebook serves DASH (separate audio/video) whose segment URLs are
