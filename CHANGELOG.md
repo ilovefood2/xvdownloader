@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.11.39] - 2026-07-01
+
+### Fixed
+- Bilibili downloads failed when its assigned CDN node was a PCDN/peer node
+  (e.g. `os=cosovbv` on `*.bilivideo.com`) that only works through the player's
+  P2P path and rejects a plain fetch with `ERR_HTTP2_PROTOCOL_ERROR` on every
+  request — for both video and audio, regardless of thread count. Bilibili's
+  `upsig` signature covers the query params, not the hostname, so the resolver
+  now appends host-swapped fallbacks that retarget the signed URL to reliable
+  UPOS mirrors (Alibaba, Tencent, Akamai). The downloader tries the original
+  hosts first, then these, so a hostile node is bypassed cleanly.
+
 ## [1.11.38] - 2026-07-01
 
 ### Changed

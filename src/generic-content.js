@@ -630,6 +630,37 @@
     return videoData.title || null;
   }
 
+  // Reliable UPOS origin mirrors to retarget a signed Bilibili URL to when its
+  // assigned node (often a PCDN peer) refuses plain fetches. Order = try order.
+  const BILIBILI_UPOS_HOSTS = [
+    "upos-sz-mirrorali.bilivideo.com",
+    "upos-sz-mirrorcos.bilivideo.com",
+    "upos-hz-mirrorakam.akamaized.net",
+  ];
+
+  function bilibiliMirrorFallbacks(existingUrls) {
+    // The signed URL is valid on any UPOS host, so retarget just the primary to
+    // each reliable mirror — one clean set of fallbacks, no combinatorial blowup.
+    const primary = existingUrls[0];
+    if (!primary) return [];
+    let parsed;
+    try {
+      parsed = new URL(primary);
+    } catch {
+      return [];
+    }
+    if (!/\.bilivideo\.com$|\.akamaized\.net$/i.test(parsed.hostname)) return [];
+
+    const out = [];
+    for (const host of BILIBILI_UPOS_HOSTS) {
+      if (parsed.hostname.toLowerCase() === host) continue;
+      const alt = new URL(primary);
+      alt.hostname = host;
+      out.push(alt.href);
+    }
+    return out;
+  }
+
   function resolveBilibiliMedia() {
     if (!/(^|\.)bilibili\.com$/.test(window.location.hostname.toLowerCase())) return null;
 
@@ -637,18 +668,23 @@
     if (!data) return null;
 
     const filename = bilibiliFilename();
-    // A stream lists a primary `baseUrl` plus `backupUrl` mirrors for the same
-    // signed content; return them all (primary first) so a flaky mirror that
-    // throws HTTP/2 errors can fall back to another host.
     const streamUrls = (stream) => {
       if (!stream) return [];
       const urls = [];
       const add = (u) => {
         if (typeof u === "string" && /^https?:\/\//.test(u) && !urls.includes(u)) urls.push(u);
       };
+      // A stream lists a primary `baseUrl` plus `backupUrl` mirrors for the same
+      // signed content — take them all, primary first.
       add(stream.baseUrl);
       add(stream.base_url);
       (stream.backupUrl || stream.backup_url || []).forEach(add);
+      // Bilibili often assigns a PCDN/peer node (e.g. os=cosovbv) that only works
+      // through the player's P2P path and rejects a plain fetch with an HTTP/2
+      // reset. The `upsig` signature covers the query params, not the host, so the
+      // same signed URL can be retargeted to a reliable UPOS mirror. Append those
+      // host-swapped variants as fallbacks (tried only if the originals fail).
+      bilibiliMirrorFallbacks(urls).forEach(add);
       return urls;
     };
 
