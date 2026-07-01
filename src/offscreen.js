@@ -66,7 +66,7 @@ async function prepare(msg) {
           control,
           onProgress,
           credentials,
-          singleGet: msg.mux.singleGet === true,
+          chunkConcurrency: msg.mux.chunkConcurrency || 0,
         }
       );
     } else if (msg.direct) {

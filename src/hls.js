@@ -566,7 +566,8 @@ async function fetchRangeChunk(url, credentials, start, end) {
  * fetching in parallel chunks gets each request a fresh full-speed burst, which
  * is ~30-40x faster for long videos.
  */
-async function downloadStreamChunked(url, total, { credentials, control, onProgress } = {}) {
+async function downloadStreamChunked(url, total, { credentials, control, onProgress, concurrency } = {}) {
+  const threads = concurrency > 0 ? Math.min(concurrency, STREAM_CHUNK_CONCURRENCY) : STREAM_CHUNK_CONCURRENCY;
   const ranges = [];
   for (let start = 0; start < total; start += STREAM_CHUNK_SIZE) {
     ranges.push([start, Math.min(start + STREAM_CHUNK_SIZE - 1, total - 1)]);
@@ -589,7 +590,7 @@ async function downloadStreamChunked(url, total, { credentials, control, onProgr
   }
 
   const results = await Promise.allSettled(
-    Array.from({ length: Math.min(STREAM_CHUNK_CONCURRENCY, ranges.length) }, worker)
+    Array.from({ length: Math.min(threads, ranges.length) }, worker)
   );
   if (control && control.canceled) throw new CanceledError();
   const failed = results.find((r) => r.status === "rejected");
@@ -637,7 +638,7 @@ async function downloadStream(urlOrUrls, opts = {}) {
 // a single streamed GET. Chunking is strictly best-effort — a probe that fails or
 // a chunk download that errors falls back to a plain GET, so this is never worse
 // than a single request. Rejects HTML error pages served in place of media.
-async function downloadStreamFrom(url, { credentials, control, onProgress, preferSingleGet } = {}) {
+async function downloadStreamFrom(url, { credentials, control, onProgress, preferSingleGet, concurrency } = {}) {
   // Facebook-style URLs carry the byte range in the query (&bytestart=&byteend=);
   // adding a Range header conflicts and the CDN 403s — fetch them plainly.
   const urlHasByteRange = /[?&]byteend=/.test(url);
@@ -656,7 +657,7 @@ async function downloadStreamFrom(url, { credentials, control, onProgress, prefe
   }
   if (probe && probe.chunkable) {
     try {
-      return await downloadStreamChunked(url, probe.total, { credentials, control, onProgress });
+      return await downloadStreamChunked(url, probe.total, { credentials, control, onProgress, concurrency });
     } catch (e) {
       if (control && control.canceled) throw e;
       // Chunked download failed mid-stream — fall through to a single GET.
@@ -676,20 +677,20 @@ async function downloadStreamFrom(url, { credentials, control, onProgress, prefe
  * Download separate video-only + audio-only MP4 streams (e.g. YouTube adaptive
  * formats) and mux them into a single MP4 with ffmpeg (stream copy, no re-encode).
  */
-export async function downloadMux(videoUrl, audioUrl, { credentials, control, onProgress, singleGet } = {}) {
+export async function downloadMux(videoUrl, audioUrl, { credentials, control, onProgress, chunkConcurrency } = {}) {
   // videoUrl/audioUrl may each be a single URL or a list of mirror URLs for the
   // same stream (primary + backups); downloadStream tries them in order.
   // Each stream goes through downloadStream, which chunks via Range when the
   // server supports it (YouTube) and falls back to a plain GET for byte-range
   // URLs (Facebook). The video dominates the size, so drive the progress bar
   // off it and let the small audio stream finish quietly.
-  // `singleGet` forces a sequential GET (no parallel Range chunks) for CDNs that
-  // reject aggressive chunking (Bilibili returns HTTP/2 resets or a 514).
+  // `chunkConcurrency` caps the parallel Range threads for CDNs that throttle or
+  // reject the default (Bilibili returns HTTP/2 resets or a 514 at 6 threads).
   const videoBlob = await downloadStream(videoUrl, {
     credentials,
     control,
     onProgress,
-    preferSingleGet: singleGet,
+    concurrency: chunkConcurrency,
   });
   // Fetch audio with a single plain GET rather than Range chunks. Audio is small,
   // so chunking buys little, and some CDNs (e.g. Bilibili serves audio from a

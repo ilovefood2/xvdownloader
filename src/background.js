@@ -484,6 +484,14 @@ function isHttpUrl(url) {
   }
 }
 
+// Clamp a caller-supplied concurrent-thread count to a sane 1..6, or 0 when
+// unset (meaning "use the downloader default").
+function clampConcurrency(value) {
+  const n = Math.floor(Number(value) || 0);
+  if (n <= 0) return 0;
+  return Math.min(6, Math.max(1, n));
+}
+
 // Build a deduped list of valid http(s) URLs for a stream, primary first, from a
 // caller-supplied candidate list plus a guaranteed primary URL.
 function sanitizeUrlList(list, primary) {
@@ -854,9 +862,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               // flaky CDN mirror can be retried against an alternate host.
               videoUrls: sanitizeUrlList(msg.mux.videoUrls, msg.mux.videoUrl),
               audioUrls: sanitizeUrlList(msg.mux.audioUrls, msg.mux.audioUrl),
-              // Some CDNs (Bilibili) reject parallel Range chunking; fetch each
-              // stream with a single sequential GET when the resolver asks.
-              singleGet: !!msg.mux.singleGet,
+              // Some CDNs (Bilibili) reject the default parallel Range chunking;
+              // the resolver can cap the video fetch to fewer concurrent threads.
+              chunkConcurrency: clampConcurrency(msg.mux.chunkConcurrency),
             }
           : null;
 

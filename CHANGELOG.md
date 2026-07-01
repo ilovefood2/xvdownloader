@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.11.38] - 2026-07-01
+
+### Changed
+- Bilibili video is now fetched with 3 concurrent Range chunks instead of a
+  single sequential GET — the default 6 threads trip its mirror/PCDN rate limit
+  (HTTP 514 / HTTP/2 reset), but 3 is accepted and restores parallel-download
+  speed. Audio stays on a single GET. The per-stream thread cap is plumbed
+  through as `chunkConcurrency` (clamped 1..6) so it can be tuned per source.
+
 ## [1.11.37] - 2026-07-01
 
 ### Fixed
