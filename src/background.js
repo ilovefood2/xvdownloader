@@ -854,6 +854,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               // flaky CDN mirror can be retried against an alternate host.
               videoUrls: sanitizeUrlList(msg.mux.videoUrls, msg.mux.videoUrl),
               audioUrls: sanitizeUrlList(msg.mux.audioUrls, msg.mux.audioUrl),
+              // Some CDNs (Bilibili) reject parallel Range chunking; fetch each
+              // stream with a single sequential GET when the resolver asks.
+              singleGet: !!msg.mux.singleGet,
             }
           : null;
 

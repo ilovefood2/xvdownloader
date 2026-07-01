@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.11.37] - 2026-07-01
+
+### Fixed
+- Bilibili downloads could fail with an HTTP `514` (or HTTP/2 reset) from its
+  mirror/PCDN nodes. Those nodes reject the aggressive parallel Range chunking
+  the downloader uses — the player streams sequentially instead. Bilibili muxed
+  streams are now fetched with a single sequential GET per stream (video and
+  audio), which the CDN accepts. Combined with the mirror fallback and
+  credential-less retry from 1.11.36, a bad node now falls back cleanly.
+
 ## [1.11.36] - 2026-07-01
 
 ### Fixed

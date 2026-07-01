@@ -676,14 +676,21 @@ async function downloadStreamFrom(url, { credentials, control, onProgress, prefe
  * Download separate video-only + audio-only MP4 streams (e.g. YouTube adaptive
  * formats) and mux them into a single MP4 with ffmpeg (stream copy, no re-encode).
  */
-export async function downloadMux(videoUrl, audioUrl, { credentials, control, onProgress } = {}) {
+export async function downloadMux(videoUrl, audioUrl, { credentials, control, onProgress, singleGet } = {}) {
   // videoUrl/audioUrl may each be a single URL or a list of mirror URLs for the
   // same stream (primary + backups); downloadStream tries them in order.
   // Each stream goes through downloadStream, which chunks via Range when the
   // server supports it (YouTube) and falls back to a plain GET for byte-range
   // URLs (Facebook). The video dominates the size, so drive the progress bar
   // off it and let the small audio stream finish quietly.
-  const videoBlob = await downloadStream(videoUrl, { credentials, control, onProgress });
+  // `singleGet` forces a sequential GET (no parallel Range chunks) for CDNs that
+  // reject aggressive chunking (Bilibili returns HTTP/2 resets or a 514).
+  const videoBlob = await downloadStream(videoUrl, {
+    credentials,
+    control,
+    onProgress,
+    preferSingleGet: singleGet,
+  });
   // Fetch audio with a single plain GET rather than Range chunks. Audio is small,
   // so chunking buys little, and some CDNs (e.g. Bilibili serves audio from a
   // different host than video) misreport the Range total on the audio endpoint,

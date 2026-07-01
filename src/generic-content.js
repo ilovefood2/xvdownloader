@@ -682,6 +682,10 @@
             audioUrl: audioUrls[0],
             videoUrls,
             audioUrls,
+            // Fetch each stream with one sequential GET, like the player does.
+            // Bilibili's mirror/PCDN nodes reject aggressive parallel Range
+            // chunking with HTTP/2 resets or a 514 rate-limit response.
+            singleGet: true,
           },
           filename,
         };

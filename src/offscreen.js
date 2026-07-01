@@ -66,6 +66,7 @@ async function prepare(msg) {
           control,
           onProgress,
           credentials,
+          singleGet: msg.mux.singleGet === true,
         }
       );
     } else if (msg.direct) {
