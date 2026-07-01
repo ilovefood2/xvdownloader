@@ -720,8 +720,8 @@
             audioUrls,
             // Bilibili's mirror/PCDN nodes reject aggressive parallel Range
             // chunking (HTTP/2 resets or a 514 rate-limit) at the default 6
-            // threads, so cap the video fetch at a gentler 3 concurrent chunks.
-            chunkConcurrency: 3,
+            // threads, so cap the video fetch at a gentler 4 concurrent chunks.
+            chunkConcurrency: 4,
           },
           filename,
         };

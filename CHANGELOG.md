@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.11.40] - 2026-07-01
+
+### Changed
+- Bilibili video now fetches with 4 concurrent Range chunks (was 3).
+
 ## [1.11.39] - 2026-07-01
 
 ### Fixed
