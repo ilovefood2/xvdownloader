@@ -594,6 +594,10 @@ async function downloadStreamChunked(url, total, { credentials, control, onProgr
   if (control && control.canceled) throw new CanceledError();
   const failed = results.find((r) => r.status === "rejected");
   if (failed) throw failed.reason;
+  // A chunk that came back short (server ignored part of the Range) would leave a
+  // gap in the stream. Reject a truncated assembly so the caller retries with a
+  // plain GET rather than silently producing a clipped file.
+  if (done < total) throw new Error(`Chunked download short: ${done}/${total}`);
   return new Blob(parts, { type: "video/mp4" });
 }
 
@@ -602,13 +606,13 @@ async function downloadStreamChunked(url, total, { credentials, control, onProgr
 // streamed GET. Chunking is strictly best-effort — a probe that fails or a chunk
 // download that errors falls back to a plain GET, so this is never worse than a
 // single request. Rejects HTML error pages served in place of media.
-async function downloadStream(url, { credentials, control, onProgress } = {}) {
+async function downloadStream(url, { credentials, control, onProgress, preferSingleGet } = {}) {
   // Facebook-style URLs carry the byte range in the query (&bytestart=&byteend=);
   // adding a Range header conflicts and the CDN 403s — fetch them plainly.
   const urlHasByteRange = /[?&]byteend=/.test(url);
 
   let probe = null;
-  if (!urlHasByteRange) {
+  if (!preferSingleGet && !urlHasByteRange) {
     try {
       probe = await probeStreamSize(url, credentials);
     } catch (e) {
@@ -647,7 +651,13 @@ export async function downloadMux(videoUrl, audioUrl, { credentials, control, on
   // URLs (Facebook). The video dominates the size, so drive the progress bar
   // off it and let the small audio stream finish quietly.
   const videoBlob = await downloadStream(videoUrl, { credentials, control, onProgress });
-  const audioBlob = await downloadStream(audioUrl, { credentials, control });
+  // Fetch audio with a single plain GET rather than Range chunks. Audio is small,
+  // so chunking buys little, and some CDNs (e.g. Bilibili serves audio from a
+  // different host than video) misreport the Range total on the audio endpoint,
+  // which would silently truncate a chunked download and leave the muxed file's
+  // tail without sound. A streamed GET reads until the connection ends, so it
+  // always gets the whole track.
+  const audioBlob = await downloadStream(audioUrl, { credentials, control, preferSingleGet: true });
 
   await control?.gate();
   const ff = await getFfmpeg();

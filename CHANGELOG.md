@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.11.35] - 2026-07-01
+
+### Fixed
+- Muxed downloads could lose audio near the end (video full-length, tail silent).
+  The audio track is small, so it's now fetched with a single streamed GET
+  instead of Range chunks — some CDNs (e.g. Bilibili serves audio from a
+  different host than video) misreport the Range total on the audio endpoint,
+  which silently truncated the chunked download and left the file's tail without
+  sound. Also added a guard so any chunked download that comes back short falls
+  back to a plain GET instead of producing a clipped file.
+
 ## [1.11.34] - 2026-07-01
 
 ### Fixed
