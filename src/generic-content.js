@@ -339,9 +339,13 @@
     staticMediaScanned = false;
   }
 
-  function getDownloadFilename(video) {
+  function getDownloadFilename(video, overrideTitle) {
     const title =
-      document.title || video.getAttribute("aria-label") || window.location.hostname || "video";
+      overrideTitle ||
+      document.title ||
+      video.getAttribute("aria-label") ||
+      window.location.hostname ||
+      "video";
     return `${sanitizeFilename(title)}.mp4`;
   }
 
@@ -562,6 +566,119 @@
     return null;
   }
 
+  // Bilibili also serves DASH, but needs site-specific handling the structural
+  // reader above can't do: (1) copyrighted titles gate high qualities behind VIP
+  // and return a short *trial* video clip for them while the audio stays full —
+  // so a naive "highest resolution" pick yields a video that stops after a few
+  // minutes; (2) the useful filename is the current part's episode title, held in
+  // the page's own state object, not the browser tab title.
+  function readBilibiliPlayData() {
+    // A playurl response captured live by the sniffer is freshest after an
+    // in-page switch between parts; fall back to the inline __playinfo__.
+    try {
+      const raw = document.documentElement?.dataset?.xvdBilibiliData;
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (data && (data.dash || data.durl)) return data;
+      }
+    } catch {
+      // Fall through to the inline copy.
+    }
+
+    return readBilibiliInlineJson("__playinfo__", (value) => {
+      const data = value && (value.data || value.result || value);
+      return data && (data.dash || data.durl) ? data : null;
+    });
+  }
+
+  function readBilibiliInlineJson(marker, pick) {
+    for (const script of document.querySelectorAll("script")) {
+      const text = script.textContent || "";
+      const at = text.indexOf(marker);
+      if (at === -1) continue;
+
+      const start = text.indexOf("{", at);
+      if (start === -1) continue;
+
+      const parsed = parseJsonObjectAt(text, start);
+      const chosen = parsed?.value && pick(parsed.value);
+      if (chosen) return chosen;
+    }
+    return null;
+  }
+
+  function bilibiliPartIndex() {
+    const p = parseInt(new URLSearchParams(window.location.search).get("p") || "1", 10);
+    return Number.isFinite(p) && p > 0 ? p : 1;
+  }
+
+  function bilibiliFilename() {
+    const videoData = readBilibiliInlineJson("__INITIAL_STATE__", (state) =>
+      state && state.videoData ? state.videoData : null
+    );
+    if (!videoData) return null;
+
+    const pages = Array.isArray(videoData.pages) ? videoData.pages : [];
+    if (pages.length > 1) {
+      const page = pages[bilibiliPartIndex() - 1];
+      const part = (page && (page.part || page.title) ? String(page.part || page.title) : "").trim();
+      // A descriptive part name (e.g. "ep01 …") is the file name; a bare "P3" or
+      // numeric label is prefixed with the collection title so it's meaningful.
+      if (part && !/^\d+$/.test(part)) return part;
+      if (part && videoData.title) return `${videoData.title} ${part}`;
+    }
+    return videoData.title || null;
+  }
+
+  function resolveBilibiliMedia() {
+    if (!/(^|\.)bilibili\.com$/.test(window.location.hostname.toLowerCase())) return null;
+
+    const data = readBilibiliPlayData();
+    if (!data) return null;
+
+    const filename = bilibiliFilename();
+    const streamUrl = (stream) =>
+      (stream &&
+        (stream.baseUrl ||
+          stream.base_url ||
+          (Array.isArray(stream.backupUrl) && stream.backupUrl[0]) ||
+          (Array.isArray(stream.backup_url) && stream.backup_url[0]))) ||
+      null;
+
+    const dash = data.dash;
+    if (dash && Array.isArray(dash.video) && dash.video.length) {
+      // `data.quality` is the best quality the viewer is actually entitled to
+      // (what normal playback uses). Any representation above it is the VIP-only
+      // trial clip, so cap the video pick there to keep it full-length.
+      const entitled = Number(data.quality) || 0;
+      let videos = dash.video.slice();
+      if (entitled) {
+        const full = videos.filter((v) => (Number(v.id) || 0) <= entitled);
+        if (full.length) videos = full;
+      }
+      const video = videos.sort(
+        (a, b) =>
+          (Number(b.id) || 0) - (Number(a.id) || 0) ||
+          (Number(b.bandwidth) || 0) - (Number(a.bandwidth) || 0)
+      )[0];
+
+      const audio = (Array.isArray(dash.audio) ? dash.audio.slice() : []).sort(
+        (a, b) => (Number(b.bandwidth) || 0) - (Number(a.bandwidth) || 0)
+      )[0];
+
+      const videoUrl = streamUrl(video);
+      const audioUrl = streamUrl(audio);
+      if (videoUrl && audioUrl) return { mux: { videoUrl, audioUrl }, filename };
+    }
+
+    // Older single-file (durl) videos — only usable when it's a real .mp4.
+    if (Array.isArray(data.durl) && data.durl[0]?.url) {
+      return { direct: data.durl[0].url, filename };
+    }
+
+    return null;
+  }
+
   function getYouTubeVideoId() {
     const host = window.location.hostname.toLowerCase();
     const valid = (id) => (/^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null);
@@ -642,6 +759,7 @@
     let { direct, hls } = getLatestMediaUrls(video);
     const youtubeVideoId = getYouTubeVideoId();
     let mux = null;
+    let mediaTitle = null;
 
     // The authorized-XHR URL overrides anything sniffed (the bare page link 403s).
     try {
@@ -669,6 +787,24 @@
       }
     } catch (e) {
       /* fall through */
+    }
+
+    // Bilibili is DASH with site-specific quirks (VIP trial clips, part titles).
+    try {
+      const bilibili = resolveBilibiliMedia();
+      if (bilibili) {
+        if (bilibili.mux) {
+          mux = bilibili.mux;
+          direct = null;
+          hls = null;
+        } else if (bilibili.direct) {
+          direct = bilibili.direct;
+          hls = null;
+        }
+        if (bilibili.filename) mediaTitle = bilibili.filename;
+      }
+    } catch (e) {
+      /* fall through to the generic path */
     }
 
     // Sites that expose only an embedded DASH manifest (separate video+audio
@@ -706,7 +842,7 @@
         hls,
         youtubeVideoId,
         mux,
-        filename: getDownloadFilename(video),
+        filename: getDownloadFilename(video, mediaTitle),
       });
 
       if (downloadCanceled || activeRequestId !== requestId) return;

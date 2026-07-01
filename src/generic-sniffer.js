@@ -134,6 +134,34 @@
     collectFacebookProgressiveUrls(normalized);
     collectYouTubePlayerUrls(normalized);
     collectEmbeddedDashManifest(normalized);
+    collectBilibiliPlayData(normalized);
+  }
+
+  // Bilibili refetches its playurl (dash streams + the `quality` the viewer is
+  // entitled to) from an API when switching parts in-page, so the copy inlined in
+  // the original HTML goes stale. On bilibili only, stash the whole data block —
+  // not just `dash` — so the content script can also read `quality` to skip the
+  // short VIP trial clip that copyrighted titles return for gated qualities.
+  function collectBilibiliPlayData(text) {
+    if (!/(^|\.)bilibili\.com$/i.test(location.hostname)) return;
+    if (text.indexOf('"dash"') === -1 && text.indexOf('"durl"') === -1) return;
+
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      return; // Only whole playurl responses are JSON; snippets are ignored.
+    }
+
+    const data = json && (json.data || json.result);
+    if (!data || (!data.dash && !data.durl)) return;
+
+    try {
+      const root = document.documentElement;
+      if (root) root.dataset.xvdBilibiliData = JSON.stringify(data);
+    } catch {
+      // Some pages restrict DOM writes; the inline __playinfo__ path still works.
+    }
   }
 
   // Some sites deliver adaptive media as a DASH manifest embedded in JSON rather

@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.11.34] - 2026-07-01
+
+### Fixed
+- Bilibili downloads: the muxed file played video for only a few minutes and
+  then continued as audio-only, and it was named after the browser tab title
+  instead of the episode. Added a Bilibili-specific resolver:
+  - It caps the video pick at `data.quality` — the quality the viewer is
+    actually entitled to. Copyrighted titles gate higher qualities behind VIP
+    and return a short *trial* clip for them while the audio track stays full
+    length, so the previous "highest resolution" pick grabbed the trial video.
+  - It names the file after the current part's episode title (from the page's
+    `__INITIAL_STATE__.videoData.pages`), falling back to the collection title,
+    instead of the `…_哔哩哔哩_bilibili` tab title.
+  - The sniffer now stashes the whole playurl `data` block (not just `dash`) on
+    Bilibili so switching parts in-page keeps both selections correct.
+
 ## [1.11.33] - 2026-07-01
 
 ### Added
