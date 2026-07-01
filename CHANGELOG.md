@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.11.36] - 2026-07-01
+
+### Fixed
+- Muxed downloads failed outright when a CDN mirror threw
+  `ERR_HTTP2_PROTOCOL_ERROR` (seen on some Bilibili `*.bilivideo.com` mirrors) —
+  the whole download errored with "network error". Streams are now resilient to a
+  flaky mirror:
+  - Each stream can carry a list of mirror URLs (primary + the CDN's own backup
+    hosts). The Bilibili resolver now forwards `backupUrl`/`backup_url`, and the
+    downloader tries them in order.
+  - Every URL is retried once, and the retry drops credentials — signed CDN URLs
+    don't need cookies, and a large Cookie header can itself trip an HTTP/2 reset.
+  - The Referer spoofing rule now covers every mirror host, not just the primary.
+
 ## [1.11.35] - 2026-07-01
 
 ### Fixed

@@ -637,13 +637,20 @@
     if (!data) return null;
 
     const filename = bilibiliFilename();
-    const streamUrl = (stream) =>
-      (stream &&
-        (stream.baseUrl ||
-          stream.base_url ||
-          (Array.isArray(stream.backupUrl) && stream.backupUrl[0]) ||
-          (Array.isArray(stream.backup_url) && stream.backup_url[0]))) ||
-      null;
+    // A stream lists a primary `baseUrl` plus `backupUrl` mirrors for the same
+    // signed content; return them all (primary first) so a flaky mirror that
+    // throws HTTP/2 errors can fall back to another host.
+    const streamUrls = (stream) => {
+      if (!stream) return [];
+      const urls = [];
+      const add = (u) => {
+        if (typeof u === "string" && /^https?:\/\//.test(u) && !urls.includes(u)) urls.push(u);
+      };
+      add(stream.baseUrl);
+      add(stream.base_url);
+      (stream.backupUrl || stream.backup_url || []).forEach(add);
+      return urls;
+    };
 
     const dash = data.dash;
     if (dash && Array.isArray(dash.video) && dash.video.length) {
@@ -666,9 +673,19 @@
         (a, b) => (Number(b.bandwidth) || 0) - (Number(a.bandwidth) || 0)
       )[0];
 
-      const videoUrl = streamUrl(video);
-      const audioUrl = streamUrl(audio);
-      if (videoUrl && audioUrl) return { mux: { videoUrl, audioUrl }, filename };
+      const videoUrls = streamUrls(video);
+      const audioUrls = streamUrls(audio);
+      if (videoUrls.length && audioUrls.length) {
+        return {
+          mux: {
+            videoUrl: videoUrls[0],
+            audioUrl: audioUrls[0],
+            videoUrls,
+            audioUrls,
+          },
+          filename,
+        };
+      }
     }
 
     // Older single-file (durl) videos — only usable when it's a real .mp4.

@@ -59,11 +59,15 @@ async function prepare(msg) {
     let result;
     if (msg.mux) {
       console.log("[XVD] preparing muxed video+audio");
-      result = await downloadMux(msg.mux.videoUrl, msg.mux.audioUrl, {
-        control,
-        onProgress,
-        credentials,
-      });
+      result = await downloadMux(
+        msg.mux.videoUrls || msg.mux.videoUrl,
+        msg.mux.audioUrls || msg.mux.audioUrl,
+        {
+          control,
+          onProgress,
+          credentials,
+        }
+      );
     } else if (msg.direct) {
       console.log("[XVD] preparing direct MP4");
       try {

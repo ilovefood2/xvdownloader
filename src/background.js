@@ -405,8 +405,9 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
       ? await setMediaRefererRule(jobId, meta.pageUrl, [
           source.hls,
           source.url,
-          source.mux && source.mux.videoUrl,
-          source.mux && source.mux.audioUrl,
+          // Include every mux mirror host so backups are Referer-spoofed too.
+          ...((source.mux && source.mux.videoUrls) || [source.mux && source.mux.videoUrl]),
+          ...((source.mux && source.mux.audioUrls) || [source.mux && source.mux.audioUrl]),
         ])
       : false;
 
@@ -481,6 +482,18 @@ function isHttpUrl(url) {
   } catch {
     return false;
   }
+}
+
+// Build a deduped list of valid http(s) URLs for a stream, primary first, from a
+// caller-supplied candidate list plus a guaranteed primary URL.
+function sanitizeUrlList(list, primary) {
+  const out = [];
+  const add = (u) => {
+    if (isHttpUrl(u) && !out.includes(u)) out.push(u);
+  };
+  add(primary);
+  if (Array.isArray(list)) list.forEach(add);
+  return out;
 }
 
 function isHttpMp4Url(url) {
@@ -834,7 +847,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const hls = isHttpHlsUrl(msg.hls) ? msg.hls : null;
       const mux =
         msg.mux && isHttpUrl(msg.mux.videoUrl) && isHttpUrl(msg.mux.audioUrl)
-          ? { videoUrl: msg.mux.videoUrl, audioUrl: msg.mux.audioUrl }
+          ? {
+              videoUrl: msg.mux.videoUrl,
+              audioUrl: msg.mux.audioUrl,
+              // Backup mirror URLs for the same stream (primary kept first), so a
+              // flaky CDN mirror can be retried against an alternate host.
+              videoUrls: sanitizeUrlList(msg.mux.videoUrls, msg.mux.videoUrl),
+              audioUrls: sanitizeUrlList(msg.mux.audioUrls, msg.mux.audioUrl),
+            }
           : null;
 
       const jobId = ++jobSeq;

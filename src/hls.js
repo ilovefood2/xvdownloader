@@ -601,12 +601,43 @@ async function downloadStreamChunked(url, total, { credentials, control, onProgr
   return new Blob(parts, { type: "video/mp4" });
 }
 
-// Download a stream as a Blob: concurrent Range chunks when the server supports
-// them (much faster, and bypasses per-connection rate throttling), else a single
-// streamed GET. Chunking is strictly best-effort — a probe that fails or a chunk
-// download that errors falls back to a plain GET, so this is never worse than a
-// single request. Rejects HTML error pages served in place of media.
-async function downloadStream(url, { credentials, control, onProgress, preferSingleGet } = {}) {
+// Download a stream, trying each candidate URL in turn. Adaptive CDNs (e.g.
+// Bilibili) hand out a primary host plus backup mirror hosts for the same signed
+// stream; a flaky mirror can throw ERR_HTTP2_PROTOCOL_ERROR (surfaced as a fetch
+// "network error") on every request, so fall back to the next mirror instead of
+// failing the whole download. Each URL is also retried once, since these HTTP/2
+// resets are frequently transient.
+async function downloadStream(urlOrUrls, opts = {}) {
+  const urls = (Array.isArray(urlOrUrls) ? urlOrUrls : [urlOrUrls]).filter(
+    (u) => typeof u === "string" && u
+  );
+  if (!urls.length) throw new Error("No stream URL");
+
+  let lastError;
+  for (const url of urls) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        // Retry attempt drops credentials: signed CDN URLs (Bilibili, YouTube)
+        // don't need cookies, and sending them can trip an HTTP/2 reset — so if
+        // the credentialed request fails, try again anonymously before moving on.
+        const attemptOpts =
+          attempt === 0 ? opts : { ...opts, credentials: "omit" };
+        return await downloadStreamFrom(url, attemptOpts);
+      } catch (e) {
+        if (opts.control && opts.control.canceled) throw e;
+        lastError = e;
+      }
+    }
+  }
+  throw lastError || new Error("Stream download failed");
+}
+
+// Download a single stream URL as a Blob: concurrent Range chunks when the server
+// supports them (much faster, and bypasses per-connection rate throttling), else
+// a single streamed GET. Chunking is strictly best-effort — a probe that fails or
+// a chunk download that errors falls back to a plain GET, so this is never worse
+// than a single request. Rejects HTML error pages served in place of media.
+async function downloadStreamFrom(url, { credentials, control, onProgress, preferSingleGet } = {}) {
   // Facebook-style URLs carry the byte range in the query (&bytestart=&byteend=);
   // adding a Range header conflicts and the CDN 403s — fetch them plainly.
   const urlHasByteRange = /[?&]byteend=/.test(url);
@@ -646,6 +677,8 @@ async function downloadStream(url, { credentials, control, onProgress, preferSin
  * formats) and mux them into a single MP4 with ffmpeg (stream copy, no re-encode).
  */
 export async function downloadMux(videoUrl, audioUrl, { credentials, control, onProgress } = {}) {
+  // videoUrl/audioUrl may each be a single URL or a list of mirror URLs for the
+  // same stream (primary + backups); downloadStream tries them in order.
   // Each stream goes through downloadStream, which chunks via Range when the
   // server supports it (YouTube) and falls back to a plain GET for byte-range
   // URLs (Facebook). The video dominates the size, so drive the progress bar
