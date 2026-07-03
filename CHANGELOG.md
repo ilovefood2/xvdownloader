@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.11.41] - 2026-07-03
+
+### Fixed
+- YouTube downloads could stall at 99% and never finish. The audio track was
+  fetched as one long single GET, which dies on a lossy link with
+  `ERR_QUIC_PROTOCOL_ERROR` (`QUIC_TOO_MANY_RTOS` / `QUIC_PUBLIC_RESET`) partway
+  through a large read. That failed the whole video+audio mux and silently
+  dropped the download to the progressive MP4 — a single throttled stream that
+  crawls for a long video while the bar sits frozen at 99%. Audio now downloads
+  with the same parallel Range chunks as the video (short requests survive a
+  QUIC reset, and any failed chunk is retried), so the mux succeeds and the slow
+  fallback is no longer triggered. Sources whose audio host misreports the Range
+  total (Bilibili) opt back into the single GET via a new `audioSingleGet` flag.
+
+### Changed
+- The ffmpeg mux now reports real progress and the button shows "Muxing…"
+  instead of a frozen 99%, so a long stream-copy reads as working. A 15-minute
+  watchdog on the mux surfaces a wedged ffmpeg core as a retryable error rather
+  than hanging the job (and the UI) indefinitely.
+
 ## [1.11.40] - 2026-07-01
 
 ### Changed

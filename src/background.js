@@ -825,6 +825,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           requestId: job.requestId,
           done: msg.done,
           total: msg.total,
+          phase: msg.phase,
         })
         .catch(() => {});
     }
@@ -865,6 +866,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               // Some CDNs (Bilibili) reject the default parallel Range chunking;
               // the resolver can cap the video fetch to fewer concurrent threads.
               chunkConcurrency: clampConcurrency(msg.mux.chunkConcurrency),
+              // …and opt audio back into a single GET when Range-chunking it would
+              // truncate (Bilibili's audio host misreports the Range total).
+              audioSingleGet: msg.mux.audioSingleGet === true,
             }
           : null;
 

@@ -40,10 +40,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false;
 });
 
-function reportProgress(jobId, done, total) {
+function reportProgress(jobId, done, total, phase) {
   if (jobId == null) return;
   chrome.runtime
-    .sendMessage({ type: "XVD_PROGRESS", jobId, done, total })
+    .sendMessage({ type: "XVD_PROGRESS", jobId, done, total, phase })
     .catch(() => {});
 }
 
@@ -51,7 +51,7 @@ async function prepare(msg) {
   const jobId = msg.jobId;
   const control = new DownloadControl();
   if (jobId != null) controls.set(jobId, control);
-  const onProgress = (done, total) => reportProgress(jobId, done, total);
+  const onProgress = (done, total, phase) => reportProgress(jobId, done, total, phase);
   const credentials = msg.credentials || "include";
   const allowTsFallback = msg.allowTsFallback === true;
 
@@ -67,6 +67,7 @@ async function prepare(msg) {
           onProgress,
           credentials,
           chunkConcurrency: msg.mux.chunkConcurrency || 0,
+          audioSingleGet: msg.mux.audioSingleGet === true,
         }
       );
     } else if (msg.direct) {

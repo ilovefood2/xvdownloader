@@ -27,6 +27,7 @@
   let activeRequestId = null;
   let paused = false;
   let lastProgress = null;
+  let muxing = false;
   let downloadCanceled = false;
 
   const wrap = document.createElement("div");
@@ -67,6 +68,7 @@
   chrome.runtime.onMessage.addListener((msg) => {
     if (!msg || msg.type !== "XVD_PROGRESS" || msg.requestId !== activeRequestId) return;
     if (!msg.total) return;
+    muxing = msg.phase === "mux";
     lastProgress = Math.min(99, Math.floor((msg.done / msg.total) * 100));
     renderProgress();
   });
@@ -722,6 +724,9 @@
             // chunking (HTTP/2 resets or a 514 rate-limit) at the default 6
             // threads, so cap the video fetch at a gentler 4 concurrent chunks.
             chunkConcurrency: 4,
+            // Bilibili's audio host misreports the Range total, so chunking it
+            // would silently truncate the track — fetch audio as one plain GET.
+            audioSingleGet: true,
           },
           filename,
         };
@@ -888,6 +893,7 @@
     const requestId = activeRequestId;
     paused = false;
     lastProgress = null;
+    muxing = false;
     downloadCanceled = false;
     setButtonState("busy", "Fetching...");
 
@@ -929,6 +935,13 @@
   }
 
   function renderProgress() {
+    // Muxing runs after the download finishes and isn't pausable — label it
+    // plainly so a long stream-copy reads as "working", not a frozen 99%.
+    if (muxing) {
+      button.textContent = `Muxing ${lastProgress == null ? 0 : lastProgress}%`;
+      button.title = "Merging video and audio";
+      return;
+    }
     if (lastProgress == null) {
       button.textContent = paused ? "Resume" : "Fetching...";
       button.title = paused ? "Resume download" : "Pause download";

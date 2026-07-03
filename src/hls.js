@@ -510,6 +510,7 @@ export async function downloadDirect(url, { credentials, control, onProgress } =
 
 const STREAM_CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB, matches yt-dlp's default
 const STREAM_CHUNK_CONCURRENCY = 6; // enough to saturate a link; matches SEGMENT_CONCURRENCY
+const MUX_TIMEOUT_MS = 15 * 60 * 1000; // watchdog so a wedged ffmpeg core can't hang the job forever
 
 // Probe a stream's total size with a tiny range request, and confirm the server
 // honours Range (206) so we can chunk it.
@@ -677,7 +678,7 @@ async function downloadStreamFrom(url, { credentials, control, onProgress, prefe
  * Download separate video-only + audio-only MP4 streams (e.g. YouTube adaptive
  * formats) and mux them into a single MP4 with ffmpeg (stream copy, no re-encode).
  */
-export async function downloadMux(videoUrl, audioUrl, { credentials, control, onProgress, chunkConcurrency } = {}) {
+export async function downloadMux(videoUrl, audioUrl, { credentials, control, onProgress, chunkConcurrency, audioSingleGet } = {}) {
   // videoUrl/audioUrl may each be a single URL or a list of mirror URLs for the
   // same stream (primary + backups); downloadStream tries them in order.
   // Each stream goes through downloadStream, which chunks via Range when the
@@ -692,13 +693,21 @@ export async function downloadMux(videoUrl, audioUrl, { credentials, control, on
     onProgress,
     concurrency: chunkConcurrency,
   });
-  // Fetch audio with a single plain GET rather than Range chunks. Audio is small,
-  // so chunking buys little, and some CDNs (e.g. Bilibili serves audio from a
-  // different host than video) misreport the Range total on the audio endpoint,
-  // which would silently truncate a chunked download and leave the muxed file's
-  // tail without sound. A streamed GET reads until the connection ends, so it
-  // always gets the whole track.
-  const audioBlob = await downloadStream(audioUrl, { credentials, control, preferSingleGet: true });
+  // Audio: prefer the same parallel Range chunks the video uses. A single long
+  // GET is far more likely to die mid-transfer on a lossy link — YouTube's
+  // googlevideo QUIC connection throws ERR_QUIC_PROTOCOL_ERROR (QUIC_TOO_MANY_RTOS
+  // / QUIC_PUBLIC_RESET) on a sustained ~46 MB read, which fails the whole mux and
+  // drops the download to the slow progressive fallback. Short chunks each get a
+  // fresh request and any one that resets is retried, so chunking survives it.
+  // `audioSingleGet` opts a source back into the plain GET: Bilibili serves audio
+  // from a different host that misreports the Range total, which would silently
+  // truncate a chunked download and leave the muxed tail without sound.
+  const audioBlob = await downloadStream(audioUrl, {
+    credentials,
+    control,
+    preferSingleGet: audioSingleGet === true,
+    concurrency: chunkConcurrency,
+  });
 
   await control?.gate();
   const ff = await getFfmpeg();
@@ -725,6 +734,16 @@ export async function downloadMux(videoUrl, audioUrl, { credentials, control, on
   );
 
   console.log("[XVD] ffmpeg: muxing video + audio…");
+  // Drive the progress bar off ffmpeg's own progress events during the mux so a
+  // large file doesn't sit at a frozen 99% while it stream-copies. The `mux`
+  // phase tag lets the UI relabel this as "Muxing…" instead of a download %.
+  const onMuxProgress = onProgress
+    ? ({ progress }) => {
+        const pct = Math.max(0, Math.min(100, Math.round((Number(progress) || 0) * 100)));
+        onProgress(pct, 100, "mux");
+      }
+    : null;
+  if (onMuxProgress) ff.on("progress", onMuxProgress);
   try {
     // Map video from input 0 and audio from input 1 so ffmpeg can never silently
     // emit an audio-only file. Try MP4 first; if its muxer rejects the codec
@@ -736,6 +755,9 @@ export async function downloadMux(videoUrl, audioUrl, { credentials, control, on
       } catch (e) {
         /* not there yet */
       }
+      // Cap the exec so a wedged core surfaces as an error instead of hanging the
+      // job (and the UI) forever; a stream copy of even a long video is minutes,
+      // not the 15 min ceiling.
       await ff.exec([
         "-i", `${MOUNT}/v.mp4`,
         "-i", `${MOUNT}/a.m4a`,
@@ -743,7 +765,7 @@ export async function downloadMux(videoUrl, audioUrl, { credentials, control, on
         "-map", "1:a:0",
         "-c", "copy",
         outName,
-      ]);
+      ], MUX_TIMEOUT_MS);
       const data = await ff.readFile(outName);
       return data && data.length ? data : null;
     };
@@ -764,11 +786,12 @@ export async function downloadMux(videoUrl, audioUrl, { credentials, control, on
       throw new Error("ffmpeg mux failed: " + (ff._xvdLog || []).slice(-12).join(" | "));
     }
 
-    if (onProgress) onProgress(1, 1); // mux complete
+    if (onProgress) onProgress(100, 100, "mux"); // mux complete
     console.log("[XVD] ffmpeg: mux done →", ext);
     const type = ext === "mkv" ? "video/x-matroska" : "video/mp4";
     return { blob: new Blob([out], { type }), ext };
   } finally {
+    if (onMuxProgress) ff.off("progress", onMuxProgress);
     try {
       await ff.unmount(MOUNT);
     } catch (e) {

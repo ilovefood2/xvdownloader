@@ -118,6 +118,7 @@
     if (!btn || btn.dataset.state !== "busy") return;
     if (!msg.total) return;
     const pct = Math.min(99, Math.floor((msg.done / msg.total) * 100));
+    btn.xvdMux = msg.phase === "mux"; // post-download merge phase
     btn.xvdPct = pct; // remember for pause/resume labels
     renderProgress(btn);
   });
@@ -126,6 +127,13 @@
   function renderProgress(btn) {
     const label = btn.querySelector(".xvd-label");
     if (!label) return;
+    // Muxing runs after the download and isn't pausable — show a plain label so a
+    // long stream-copy doesn't look like a stalled download.
+    if (btn.xvdMux) {
+      if (btn.xvdWrap) btn.xvdWrap.classList.add("xvd-downloading");
+      label.textContent = "Mux " + (btn.xvdPct == null ? 0 : btn.xvdPct) + "%";
+      return;
+    }
     if (btn.xvdPct == null) return; // still "Fetching…" (no segments yet)
     // Reveal pause/cancel affordances once a resumable download is underway.
     if (btn.xvdWrap) btn.xvdWrap.classList.add("xvd-downloading");
@@ -170,6 +178,7 @@
     jobButtons.set(requestId, btn);
     btn.xvdRequestId = requestId;
     btn.xvdPct = null;
+    btn.xvdMux = false;
     btn.xvdPaused = false;
     btn.xvdCanceled = false;
     btn.classList.remove("xvd-paused");
