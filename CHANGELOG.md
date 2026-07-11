@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.11.42] - 2026-07-10
+
+### Changed
+- HLS segment fetches now retry a dropped connection with exponential backoff +
+  jitter (up to 5 attempts) instead of failing the whole download on the first
+  hiccup, so a transient `net::ERR_CONNECTION_RESET` or network blip no longer
+  aborts an otherwise healthy download. A genuine HTTP error (403/404) still
+  fails fast.
+
+  Note: this does NOT make sites whose third-party CDN gates its `.ts` segments
+  behind a play-time session token downloadable — those reset every request
+  (including the very first, fetched alone), which no amount of retrying or
+  pacing can bypass without emulating the site's own player.
+
 ## [1.11.41] - 2026-07-03
 
 ### Fixed

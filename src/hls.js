@@ -298,6 +298,44 @@ async function runWorkers(count, control, task) {
   if (failed) throw failed.reason;
 }
 
+// Short sleep to space out segment retries. Cancellation is enforced by the
+// control.gate() call that follows each backoff, so a plain timer suffices.
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Transient = the connection dropped, not a real HTTP status. Anti-hotlink CDNs
+// answer parallel/rapid segment requests with a TCP reset (net::ERR_CONNECTION_RESET,
+// surfaced to fetch as a "Failed to fetch" TypeError) rather than a 4xx — so those
+// are worth backing off and retrying, whereas a genuine 403/404 is not.
+function isTransientFetchError(e) {
+  const m = String((e && e.message) || e || "");
+  return /failed to fetch|networkerror|network error|load failed|connection|reset|timed out/i.test(m);
+}
+
+// Fetch one segment, retrying transient connection resets with exponential
+// backoff + jitter. A real HTTP error (or cancellation) fails fast.
+async function fetchSegment(fetchTimed, url, control, timeout = 30000, attempts = 5) {
+  let lastErr;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) {
+      const backoff = Math.min(5000, 400 * 2 ** (attempt - 1));
+      await sleep(backoff + Math.floor(Math.random() * 300));
+    }
+    await control.gate();
+    try {
+      const r = await fetchTimed(url, timeout);
+      if (!r.ok) throw new Error("Segment HTTP " + r.status);
+      return r;
+    } catch (e) {
+      if (control.canceled) throw e;
+      lastErr = e;
+      if (!isTransientFetchError(e)) throw e;
+    }
+  }
+  throw lastErr;
+}
+
 /** Unencrypted fragmented-MP4: byte-concatenate init + segments → MP4. */
 async function assembleConcat(mapUrl, segments, ctx) {
   const { fetchTimed, control, onProgress } = ctx;
@@ -307,8 +345,7 @@ async function assembleConcat(mapUrl, segments, ctx) {
   if (onProgress) onProgress(0, urls.length);
   console.log("[XVD] HLS: downloading", urls.length, "segments");
   await runWorkers(urls.length, control, async (i) => {
-    const r = await fetchTimed(urls[i], 30000);
-    if (!r.ok) throw new Error("Segment HTTP " + r.status);
+    const r = await fetchSegment(fetchTimed, urls[i], control, 30000);
     parts[i] = await r.blob();
     done++;
     if (onProgress && (done % 10 === 0 || done === urls.length)) {
@@ -377,8 +414,7 @@ async function assembleTsConcat(media, ctx, reason) {
 
   await runWorkers(total, control, async (i) => {
     const segment = plan.segments[i];
-    const r = await fetchTimed(segment.url, 30000);
-    if (!r.ok) throw new Error("Segment HTTP " + r.status);
+    const r = await fetchSegment(fetchTimed, segment.url, control, 30000);
 
     if (segment.keyUrl) {
       const cryptoKey = await getAesKey(fetchTimed, segment.keyUrl, keyCache);
@@ -425,8 +461,7 @@ async function assembleWithFfmpeg(media, ctx) {
   if (onProgress) onProgress(0, total);
   console.log("[XVD] ffmpeg: downloading", total, "files");
   await runWorkers(total, control, async (i) => {
-    const r = await fetchTimed(downloads[i].url, 30000);
-    if (!r.ok) throw new Error("Segment HTTP " + r.status);
+    const r = await fetchSegment(fetchTimed, downloads[i].url, control, 30000);
     await ff.writeFile(downloads[i].name, new Uint8Array(await r.arrayBuffer()));
     done++;
     if (onProgress && (done % 10 === 0 || done === total)) onProgress(done, total);
