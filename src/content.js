@@ -36,6 +36,10 @@
     }
   });
 
+  // Ask the document_start MAIN-world sniffer to replay responses it may have
+  // captured before this document_idle listener was registered.
+  window.postMessage({ source: "XVD_MEDIA_REQUEST" }, "*");
+
   /** Find the tweet status id (and author handle) a given video belongs to. */
   function findTweetRef(videoEl) {
     let el = videoEl;

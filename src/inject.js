@@ -12,6 +12,68 @@
   "use strict";
 
   const TAG = "XVD_MEDIA";
+  const REQUEST_TAG = "XVD_MEDIA_REQUEST";
+  const harvestedTweets = {};
+
+  function addVariants(out, id, variants, text) {
+    if (!id || !Array.isArray(variants) || !variants.some((v) => v && v.url)) {
+      return;
+    }
+    const entry = out[id] || (out[id] = { lists: [], text: "" });
+    entry.lists.push(variants);
+    if (text && !entry.text) entry.text = text;
+  }
+
+  // Unified cards serialize their media entities inside a JSON string instead
+  // of exposing them as normal tweet `extended_entities`. Associate those
+  // variants with the containing tweet id, not the card media id.
+  function harvestUnifiedCard(node, out, tweetId, text) {
+    const bindings =
+      node &&
+      node.card &&
+      node.card.legacy &&
+      node.card.legacy.binding_values;
+    if (!tweetId || !Array.isArray(bindings)) return;
+
+    for (const binding of bindings) {
+      if (!binding || binding.key !== "unified_card") continue;
+      const raw = binding.value && binding.value.string_value;
+      if (typeof raw !== "string" || raw[0] !== "{") continue;
+      try {
+        const card = JSON.parse(raw);
+        const entities = card && card.media_entities;
+        if (!entities || typeof entities !== "object") continue;
+        for (const media of Object.values(entities)) {
+          addVariants(out, tweetId, media && media.video_info && media.video_info.variants, text);
+        }
+      } catch (e) {
+        /* ignore malformed card payloads */
+      }
+    }
+  }
+
+  function mergeHarvested(incoming) {
+    for (const id in incoming) {
+      const source = incoming[id];
+      const target =
+        harvestedTweets[id] || (harvestedTweets[id] = { lists: [], text: "" });
+      const seen = new Set(target.lists.map((list) => list[0] && list[0].url));
+      for (const list of source.lists || []) {
+        const key = list[0] && list[0].url;
+        if (key && !seen.has(key)) {
+          seen.add(key);
+          target.lists.push(list);
+        }
+      }
+      if (source.text && !target.text) target.text = source.text;
+    }
+  }
+
+  function publish(tweets) {
+    if (!Object.keys(tweets).length) return;
+    mergeHarvested(tweets);
+    window.postMessage({ source: TAG, tweets }, "*");
+  }
 
   /** Recursively pull { tweetId -> {lists, text} } out of an API response. */
   function harvest(node, out, depth) {
@@ -29,15 +91,12 @@
       (container.extended_entities && container.extended_entities.media) ||
       (container.entities && container.entities.media);
 
+    harvestUnifiedCard(node, out, restId && String(restId), container.full_text || "");
+
     if (restId && Array.isArray(media)) {
       for (const m of media) {
         if (m && m.video_info && Array.isArray(m.video_info.variants)) {
-          const id = String(restId);
-          const entry = out[id] || (out[id] = { lists: [], text: "" });
-          entry.lists.push(m.video_info.variants);
-          if (container.full_text && !entry.text) {
-            entry.text = container.full_text;
-          }
+          addVariants(out, String(restId), m.video_info.variants, container.full_text || "");
         }
       }
     }
@@ -55,13 +114,23 @@
     try {
       const out = {};
       harvest(json, out, 0);
-      if (Object.keys(out).length) {
-        window.postMessage({ source: TAG, tweets: out }, "*");
-      }
+      publish(out);
     } catch (e) {
       /* never let sniffing break the page */
     }
   }
+
+  // The MAIN-world sniffer starts at document_start, while the isolated
+  // content script starts at document_idle. Replay anything harvested before
+  // its listener existed so initial TweetDetail responses are not lost.
+  window.addEventListener("message", (event) => {
+    if (event.source !== window || !event.data || event.data.source !== REQUEST_TAG) {
+      return;
+    }
+    if (Object.keys(harvestedTweets).length) {
+      window.postMessage({ source: TAG, tweets: harvestedTweets }, "*");
+    }
+  });
 
   function isApiUrl(url) {
     return typeof url === "string" && /graphql|\/i\/api\//i.test(url);
