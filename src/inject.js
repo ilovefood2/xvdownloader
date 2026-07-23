@@ -24,6 +24,34 @@
     if (text && !entry.text) entry.text = text;
   }
 
+  function variantsFromMedia(media) {
+    if (!media || typeof media !== "object") return null;
+    if (media.video_info && Array.isArray(media.video_info.variants)) {
+      return media.video_info.variants;
+    }
+    if (media.media_info && Array.isArray(media.media_info.variants)) {
+      return media.media_info.variants;
+    }
+    const result =
+      media.media_results &&
+      media.media_results.result &&
+      media.media_results.result.media_info;
+    if (result && Array.isArray(result.variants)) {
+      return result.variants;
+    }
+    return null;
+  }
+
+  function mediaArraysFrom(container, node) {
+    return [
+      container.extended_entities && container.extended_entities.media,
+      container.entities && container.entities.media,
+      container.media_entities,
+      node.media_entities,
+      node.tweet && node.tweet.media_entities,
+    ].filter(Array.isArray);
+  }
+
   // Unified cards serialize their media entities inside a JSON string instead
   // of exposing them as normal tweet `extended_entities`. Associate those
   // variants with the containing tweet id, not the card media id.
@@ -44,7 +72,7 @@
         const entities = card && card.media_entities;
         if (!entities || typeof entities !== "object") continue;
         for (const media of Object.values(entities)) {
-          addVariants(out, tweetId, media && media.video_info && media.video_info.variants, text);
+          addVariants(out, tweetId, variantsFromMedia(media), text);
         }
       } catch (e) {
         /* ignore malformed card payloads */
@@ -87,16 +115,13 @@
     const legacy =
       node.legacy && typeof node.legacy === "object" ? node.legacy : null;
     const container = legacy || node;
-    const media =
-      (container.extended_entities && container.extended_entities.media) ||
-      (container.entities && container.entities.media);
 
     harvestUnifiedCard(node, out, restId && String(restId), container.full_text || "");
 
-    if (restId && Array.isArray(media)) {
-      for (const m of media) {
-        if (m && m.video_info && Array.isArray(m.video_info.variants)) {
-          addVariants(out, String(restId), m.video_info.variants, container.full_text || "");
+    if (restId) {
+      for (const media of mediaArraysFrom(container, node)) {
+        for (const m of media) {
+          addVariants(out, String(restId), variantsFromMedia(m), container.full_text || "");
         }
       }
     }

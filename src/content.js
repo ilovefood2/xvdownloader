@@ -47,14 +47,16 @@
       const links = el.querySelectorAll('a[href*="/status/"]');
       for (const a of links) {
         const href = a.getAttribute("href") || "";
-        const m = href.match(/^\/([^/]+)\/status\/(\d+)/);
+        const m = href.match(
+          /^(?:https?:\/\/(?:x|twitter)\.com)?\/([^/?#]+)\/status\/(\d+)/
+        );
         if (m) return { author: m[1], id: m[2] };
-        const idOnly = href.match(/\/status\/(\d+)/);
+        const idOnly = href.match(/\/(?:i\/)?status\/(\d+)/);
         if (idOnly) return { author: "", id: idOnly[1] };
       }
       el = el.parentElement;
     }
-    return null;
+    return findCachedRefForVideo(videoEl);
   }
 
   /** Index of this video among sibling videos within the same tweet article. */
@@ -63,6 +65,34 @@
     const videos = Array.from(article.querySelectorAll("video"));
     const idx = videos.indexOf(videoEl);
     return idx < 0 ? 0 : idx;
+  }
+
+  function normalizeMediaUrl(url) {
+    if (!url || typeof url !== "string") return "";
+    try {
+      const parsed = new URL(url);
+      parsed.hash = "";
+      return parsed.href;
+    } catch {
+      return url;
+    }
+  }
+
+  function findCachedRefForVideo(videoEl) {
+    const src = normalizeMediaUrl(
+      videoEl.currentSrc || videoEl.src || videoEl.getAttribute("src")
+    );
+    if (!src) return null;
+    for (const [id, cached] of mediaCache) {
+      for (const list of cached.lists || []) {
+        for (const variant of list || []) {
+          if (normalizeMediaUrl(variant && variant.url) === src) {
+            return { author: "", id };
+          }
+        }
+      }
+    }
+    return null;
   }
 
   /** The positioned container we attach the button to (the video's wrapper). */

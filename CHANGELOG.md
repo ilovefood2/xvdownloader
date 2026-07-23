@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.11.44] - 2026-07-23
+
+### Fixed
+- X chat embedded-post videos now use media variants sniffed from authenticated
+  `GetPostById` responses, including the newer
+  `media_results.result.media_info.variants` shape. This avoids the public
+  syndication tombstone path that showed "Tweet unavailable (sensitive or
+  protected)" inside DMs.
+- X video buttons can recover the post id from a cached media URL when the chat
+  DOM around the video does not expose a `/status/` link, avoiding the "No tweet
+  id" error for more DM layouts.
+
+## [1.11.43] - 2026-07-21
+
+### Fixed
+- Sensitive/protected X posts that store video variants inside a serialized
+  `unified_card` payload are now downloaded from the authenticated page cache
+  instead of failing through the public syndication endpoint.
+- The X page sniffer now replays media it captured at `document_start` once the
+  content script listener is ready, so early `TweetDetail` responses are not
+  missed.
+
 ## [1.11.42] - 2026-07-10
 
 ### Changed

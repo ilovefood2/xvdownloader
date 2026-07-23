@@ -182,7 +182,9 @@ function bestMp4(variants) {
     (v) => v && (v.content_type === "video/mp4" || v.type === "video/mp4") && v.url
   );
   if (!mp4s.length) return null;
-  mp4s.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+  mp4s.sort(
+    (a, b) => (b.bitrate || b.bit_rate || 0) - (a.bitrate || a.bit_rate || 0)
+  );
   return mp4s[0].url;
 }
 
