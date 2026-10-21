@@ -1,5 +1,124 @@
 # Changelog
 
+## [1.11.55] - 2026-10-20
+
+### Fixed
+- X/Twitter direct MP4 downloads no longer send cookies to `video.twimg.com`.
+  Some `amplify_video` responses use `Access-Control-Allow-Origin: *`, which is
+  incompatible with credentialed cross-origin requests and caused downloads to
+  fail even though the public CDN URL was valid.
+
+## [1.11.54] - 2026-10-09
+
+### Fixed
+- YouTube (incl. Shorts) downloads no longer hang on `Authorizing...` after the
+  first download. The vendored challenge solver's environment shim assigns
+  `globalThis.location = new URL(...)`, which inside the sandbox iframe
+  navigated the frame away right after the first solve; its MessagePort died
+  with it and every later solve waited on a dead channel until the browser was
+  restarted. `youtube-solver-setup.js` now rewrites that write to an inert
+  property before the solver core loads (solutions are unchanged).
+- If the solver channel is ever lost anyway, the offscreen document reloads the
+  sandbox and retries the solve once instead of failing every later download.
+
+### Changed
+- The download button now shows each YouTube authorization step
+  (`Loading player...`, `Getting token...`, `Solving...`, `Starting...`), and
+  failures show the actual reason (e.g. `Failed: YouTube token snapshot timed
+  out`) instead of a bare `Failed`.
+- Every YouTube authorization request now has a deadline: watch page, player
+  script and player API fetches, and each proof-token step, fail with a named
+  timeout instead of waiting indefinitely.
+- The player script fetched for the signature timestamp is handed to the
+  offscreen solver, so the multi-megabyte `base.js` is downloaded once per
+  request instead of twice.
+
+## [1.11.53] - 2026-10-01
+
+### Fixed
+- Generic sites whose `<video>` plays a plain MP4 (e.g. Plyr players with one
+  `<source>` per quality) no longer fail with a non-media URL. A page link such
+  as `/playlist?list=…` was mistaken for an extension-less HLS endpoint and,
+  because HLS was preferred, replaced the real MP4. Static `<a href>` links now
+  count only with an explicit `.mp4`/`.m3u8` extension, and an MP4 on the
+  hovered `<video>` itself takes priority over HLS sniffed elsewhere on the page.
+- When a `<video>` lists several MP4 `<source>` qualities, the highest labeled
+  resolution (`size`/`res`/`label`, or `1080p` in the URL) is downloaded rather
+  than the player's lower default.
+
+## [1.11.52] - 2026-08-29
+
+### Fixed
+- YouTube Shorts now resolve the video id from the hovered Short's own
+  `/shorts/<id>` link before falling back to the page URL. This keeps selection
+  correct when the Shorts feed has multiple preloaded players.
+- Bumped the offscreen protocol identifier and document URL with the extension
+  version, preventing a newly refreshed Shorts content script from talking to
+  an older background/offscreen worker still using the previous solver bridge.
+
+## [1.11.51] - 2026-08-29
+
+### Fixed
+- When an unpacked-extension reload invalidates scripts in already-open X or
+  generic-site tabs, the download button now says `Refresh page` instead of the
+  misleading `Failed`. A refreshed X tab downloads normally with the new
+  extension context.
+
+## [1.11.50] - 2026-08-29
+
+### Fixed
+- Replaced the YouTube solver iframe's cross-origin `window.postMessage`
+  request channel with a dedicated transferable `MessagePort`. This fixes the
+  `YouTube player started acknowledgement timed out` failure seen before the
+  first chunk was accepted.
+- Versioned the sandbox document and bridge script so reloading the unpacked
+  extension cannot reuse the previous message protocol from Chrome's cache.
+- YouTube authorization errors now stop immediately instead of falling through
+  to a sniffed unprotected googlevideo URL and producing a second `HTTP 403`.
+
+## [1.11.49] - 2026-08-29
+
+### Fixed
+- Fixed YouTube downloads hanging on `Fetching...` and eventually failing with
+  `YouTube player challenge solver timed out`. The 1.5-2 MB player script is now
+  transferred to the isolated solver in bounded chunks instead of one large
+  cross-origin `postMessage` that Chrome could silently drop.
+- Reports the proof-token/player-challenge stage as `Authorizing...`, so it is
+  distinguishable from the actual media transfer.
+
+## [1.11.48] - 2026-08-28
+
+### Fixed
+- Restored YouTube downloads for videos protected by the new SABR/GVS proof-of-
+  origin rollout. The extension now mints a fresh proof token locally, resolves
+  authorized MWEB streams, and solves the signed player URL before downloading.
+- Removed the native-download fallback that Chrome accepted and then silently
+  interrupted with `SERVER_FORBIDDEN`; the button now reports success only after
+  Chrome confirms that the completed file was written.
+
+## [1.11.47] - 2026-08-28
+
+### Fixed
+- Added a native Chrome-download fallback for YouTube videos whose googlevideo
+  URLs reject extension fetches or nonzero range chunks.
+- Applies the scoped media Referer/Origin header rule to YouTube media downloads
+  and keeps it active until the browser download completes or is interrupted.
+
+## [1.11.46] - 2026-08-28
+
+### Fixed
+- Made YouTube downloads more reliable for long videos by retrying failed range
+  chunks and preferring browser-mux-friendly H.264 MP4 streams before AV1.
+
+## [1.11.45] - 2026-08-14
+
+### Fixed
+- Moved X and generic website/YouTube download overlays to the top-left of
+  the video, lowered below the menu bar so they do not cover close or player
+  controls.
+- Raised the X overlay slightly within the top-left position to better clear
+  video content.
+
 ## [1.11.44] - 2026-07-23
 
 ### Fixed

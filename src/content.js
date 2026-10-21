@@ -241,7 +241,11 @@
       }
     } catch (e) {
       if (!btn.xvdCanceled) {
-        setButtonState(btn, "error", "Failed");
+        console.warn("[X Video Downloader]", e);
+        const needsRefresh = /extension context invalidated|receiving end does not exist|could not establish connection/i.test(
+          String((e && e.message) || e || "")
+        );
+        setButtonState(btn, "error", needsRefresh ? "Refresh page" : "Failed");
         setTimeout(() => setButtonState(btn, "idle", "Download"), 3500);
       }
     } finally {

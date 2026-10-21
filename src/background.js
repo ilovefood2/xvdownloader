@@ -13,7 +13,7 @@
 // makes (it's a forbidden header, so it can't be removed from fetch() itself).
 // Strip it via declarativeNetRequest, scoped to the player endpoint and excluded
 // for youtube.com-initiated requests so the user's own YouTube playback is
-// untouched. (googlevideo media fetches are fine with the Origin header.)
+// untouched. Media requests get their own per-download rule below.
 const YT_ORIGIN_RULE_ID = 4801;
 async function ensureYouTubeOriginRule() {
   try {
@@ -291,12 +291,24 @@ function buildFilename(meta, tweetId, ext) {
 // Service workers can't create blob URLs, so segment merging happens in an
 // offscreen document (which also gets host-permission CORS for fetches).
 let creatingOffscreen = null;
+const OFFSCREEN_VERSION = "1.11.54";
 
 async function ensureOffscreen() {
-  if (await chrome.offscreen.hasDocument()) return;
+  if (await chrome.offscreen.hasDocument()) {
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "XVD_OFFSCREEN_VERSION",
+        target: "offscreen",
+      });
+      if (response?.version === OFFSCREEN_VERSION) return;
+    } catch {
+      /* stale offscreen document has no version responder */
+    }
+    await chrome.offscreen.closeDocument();
+  }
   if (!creatingOffscreen) {
     creatingOffscreen = chrome.offscreen.createDocument({
-      url: "src/offscreen.html",
+      url: `src/offscreen.html?v=${OFFSCREEN_VERSION}`,
       reasons: ["BLOBS"],
       justification: "Merge HLS video segments into a downloadable file.",
     });
@@ -308,9 +320,8 @@ async function ensureOffscreen() {
   }
 }
 
-// Fetch the media in the offscreen document (credentialed, so X's CDN serves
-// restricted/4K videos that it refuses to a plain chrome.downloads request),
-// and get back a blob URL to download. Handles both direct MP4 and HLS.
+// Fetch the media in the offscreen document and get back a blob URL to
+// download. Handles both direct MP4 and HLS.
 async function prepareViaOffscreen(meta, jobId, credentials, options = {}) {
   await ensureOffscreen();
   // No overall timeout here: a download can be paused indefinitely by the user.
@@ -320,6 +331,7 @@ async function prepareViaOffscreen(meta, jobId, credentials, options = {}) {
     target: "offscreen",
     jobId,
     direct: meta.url || null,
+    directSingleGet: meta.directSingleGet === true,
     hls: meta.hls || null,
     mux: meta.mux || null,
     credentials,
@@ -331,17 +343,48 @@ async function prepareViaOffscreen(meta, jobId, credentials, options = {}) {
 
 // Revoke blob URLs once their download settles so memory is reclaimed.
 const pendingRevokes = new Map(); // downloadId -> blobUrl
+const pendingDownloadSettlements = new Map(); // downloadId -> { resolve, reject }
+
+function revokePendingBlob(downloadId) {
+  const blobUrl = pendingRevokes.get(downloadId);
+  if (!blobUrl) return;
+  pendingRevokes.delete(downloadId);
+  chrome.runtime
+    .sendMessage({ type: "XVD_REVOKE", target: "offscreen", blobUrl })
+    .catch(() => {});
+}
+
 chrome.downloads.onChanged.addListener((delta) => {
   if (!delta || !delta.state) return;
   const state = delta.state.current;
   if (state !== "complete" && state !== "interrupted") return;
-  const blobUrl = pendingRevokes.get(delta.id);
-  if (!blobUrl) return;
-  pendingRevokes.delete(delta.id);
-  chrome.runtime
-    .sendMessage({ type: "XVD_REVOKE", target: "offscreen", blobUrl })
-    .catch(() => {});
+
+  revokePendingBlob(delta.id);
+
+  const settlement = pendingDownloadSettlements.get(delta.id);
+  if (settlement) {
+    pendingDownloadSettlements.delete(delta.id);
+    if (state === "complete") settlement.resolve();
+    else settlement.reject(new Error(delta.error?.current || "Browser download interrupted"));
+  }
 });
+
+function waitForDownloadSettlement(downloadId) {
+  return new Promise((resolve, reject) => {
+    pendingDownloadSettlements.set(downloadId, { resolve, reject });
+    chrome.downloads.search({ id: downloadId }, (items) => {
+      const item = items && items[0];
+      if (!item || item.state === "in_progress") return;
+
+      const pending = pendingDownloadSettlements.get(downloadId);
+      if (!pending) return;
+      pendingDownloadSettlements.delete(downloadId);
+      revokePendingBlob(downloadId);
+      if (item.state === "complete") pending.resolve();
+      else pending.reject(new Error(item.error || "Browser download interrupted"));
+    });
+  });
+}
 
 async function startDownload(meta, tweetId, jobId) {
   if (!meta.url && !meta.hls) throw new Error("No downloadable video found");
@@ -351,8 +394,8 @@ async function startDownload(meta, tweetId, jobId) {
     src: meta.url || meta.hls,
   });
 
-  // Always fetch the bytes from the extension context, then download the blob.
-  const prepared = await prepareViaOffscreen(meta, jobId);
+  // X CDN URLs are self-authorizing; cookies break CORS on ACAO: * responses.
+  const prepared = await prepareViaOffscreen(meta, jobId, "omit");
   const filename = buildFilename(meta, tweetId, prepared.ext);
 
   const id = await new Promise((resolve) =>
@@ -368,11 +411,17 @@ async function startDownload(meta, tweetId, jobId) {
     );
   }
   pendingRevokes.set(id, prepared.blobUrl);
+  await waitForDownloadSettlement(id);
   return prepared.blobUrl;
 }
 
 async function startGenericDownload(meta, requestedFilename, jobId) {
-  const source = { url: meta.url || null, hls: meta.hls || null, mux: meta.mux || null };
+  const source = {
+    url: meta.url || null,
+    directSingleGet: meta.directSingleGet === true,
+    hls: meta.hls || null,
+    mux: meta.mux || null,
+  };
   // Most sites need cookies for restricted streams; YouTube's signed googlevideo
   // URLs are issued for an anonymous context and break if cookies are attached.
   let credentials = "include";
@@ -380,14 +429,23 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
   if (meta.youtubeVideoId) {
     try {
       console.log("[XVD] resolving YouTube media", meta.youtubeVideoId);
-      const resolved = await resolveYouTubeMedia(meta.youtubeVideoId);
+      const resolved = await resolveYouTubeMedia(
+        meta.youtubeVideoId,
+        jobs.get(jobId)?.tabId,
+        jobs.get(jobId)?.frameId,
+        (text) => reportStage(jobId, text)
+      );
       source.url = resolved.url || null;
+      source.directSingleGet = resolved.directSingleGet === true;
       source.mux = resolved.mux || null;
       source.hls = null;
       credentials = "omit";
+      reportStage(jobId, "Starting...");
     } catch (e) {
       console.warn("[XVD] YouTube resolver failed:", e.message);
-      if (!source.url && !source.hls && !source.mux) throw e;
+      // Sniffed googlevideo URLs do not carry the fresh proof token. Retrying
+      // one after authorization fails only adds a second, misleading HTTP 403.
+      throw e;
     }
   }
 
@@ -400,10 +458,11 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
     src: source.mux ? source.mux.videoUrl : source.hls || source.url,
   });
 
-  // YouTube uses its own anonymous googlevideo URLs; everything else may be
-  // Referer-gated, so spoof the page Referer/Origin for our fetches.
+  // Spoof the page Referer and remove Chrome's forced extension Origin for
+  // extension-owned media requests. This is scoped to the media host and to
+  // tabless extension requests, so it does not affect the user's playback.
   const refererActive =
-    !meta.youtubeVideoId && meta.pageUrl
+    meta.pageUrl
       ? await setMediaRefererRule(jobId, meta.pageUrl, [
           source.hls,
           source.url,
@@ -419,6 +478,7 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
       prepared = await prepareViaOffscreen(
         {
           url: source.hls || source.mux ? null : source.url,
+          directSingleGet: source.directSingleGet,
           hls: source.hls || null,
           mux: source.mux || null,
         },
@@ -431,7 +491,11 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
         // The adaptive remux failed (often ffmpeg OOM) — fall back to the
         // progressive MP4 so the download still succeeds at lower quality.
         console.log("[XVD] YouTube mux failed, falling back to progressive MP4:", e.message);
-        prepared = await prepareViaOffscreen({ url: source.url, hls: null, mux: null }, jobId, credentials);
+        prepared = await prepareViaOffscreen(
+          { url: source.url, directSingleGet: source.directSingleGet, hls: null, mux: null },
+          jobId,
+          credentials
+        );
       } else if (source.hls && source.url) {
         console.log("[XVD] generic HLS failed, falling back to direct media:", e.message);
         prepared = await prepareViaOffscreen({ url: source.url, hls: null }, jobId, credentials);
@@ -455,6 +519,7 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
       );
     }
     pendingRevokes.set(id, prepared.blobUrl);
+    await waitForDownloadSettlement(id);
     return prepared.blobUrl;
   } finally {
     if (refererActive) await clearMediaRefererRule(jobId);
@@ -589,20 +654,27 @@ function buildGenericFilename(requestedFilename, ext) {
   return `${base}.${extension}`;
 }
 
-const YT_ANDROID_VR_CLIENT = {
-  clientName: "ANDROID_VR",
-  clientVersion: "1.65.10",
-  deviceMake: "Oculus",
-  deviceModel: "Quest 3",
-  androidSdkVersion: 32,
-  userAgent:
-    "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-  osName: "Android",
-  osVersion: "12L",
-  hl: "en",
-  timeZone: "UTC",
-  utcOffsetMinutes: 0,
-};
+// Each YouTube authorization request gets a deadline: a stalled fetch must end
+// in a named error instead of leaving the button on "Authorizing..." forever.
+async function fetchYouTube(label, url, options, read, ms = 20000) {
+  try {
+    const response = await fetch(url, { ...options, signal: AbortSignal.timeout(ms) });
+    if (!response.ok) throw new Error(label + " HTTP " + response.status);
+    return await read(response);
+  } catch (e) {
+    if (e?.name === "TimeoutError") throw new Error(label + " timed out");
+    throw e;
+  }
+}
+
+// Tell the tab which authorization step is running, so a slow step is visible.
+function reportStage(jobId, text) {
+  const job = jobs.get(jobId);
+  if (!job || job.tabId == null) return;
+  chrome.tabs
+    .sendMessage(job.tabId, { type: "XVD_STAGE", requestId: job.requestId, text })
+    .catch(() => {});
+}
 
 function sanitizeYouTubeVideoId(value) {
   const id = String(value || "").trim();
@@ -620,6 +692,44 @@ function decodeYouTubeString(value) {
 function extractYouTubeConfigValue(text, key) {
   const match = text.match(new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`));
   return match ? decodeYouTubeString(match[1]) : "";
+}
+
+function extractYouTubeObjectAt(text, markerIndex) {
+  const start = text.indexOf("{", markerIndex);
+  if (start < 0) return "";
+
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = "";
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === "{") {
+      depth++;
+    } else if (char === "}" && --depth === 0) {
+      return text.slice(start, i + 1);
+    }
+  }
+  return "";
+}
+
+function extractYouTubePageConfig(text) {
+  const contextIndex = text.indexOf('"INNERTUBE_CONTEXT"');
+  const markerIndex = text.lastIndexOf("ytcfg.set(", contextIndex);
+  if (contextIndex < 0 || markerIndex < 0) return null;
+
+  try {
+    return JSON.parse(extractYouTubeObjectAt(text, markerIndex));
+  } catch {
+    return null;
+  }
 }
 
 function extractYouTubePlayerPath(text) {
@@ -644,21 +754,30 @@ function extractSignatureTimestamp(text) {
   return Number.isFinite(value) && value >= 10000 ? value : 0;
 }
 
-async function fetchYouTubeSignatureTimestamp(watchHtml) {
-  const inlineValue = extractSignatureTimestamp(watchHtml);
-  if (inlineValue) return inlineValue;
-
+async function fetchYouTubePlayerSource(watchHtml) {
   const playerPath = extractYouTubePlayerPath(watchHtml);
-  if (!playerPath) return 0;
+  if (!playerPath) {
+    return {
+      playerUrl: "",
+      playerJs: "",
+      signatureTimestamp: extractSignatureTimestamp(watchHtml),
+    };
+  }
 
   const playerUrl = new URL(playerPath, "https://www.youtube.com").href;
-  const response = await fetch(playerUrl, {
-    credentials: "omit",
-    cache: "no-store",
-  });
-  if (!response.ok) return 0;
-
-  return extractSignatureTimestamp(await response.text());
+  const playerJs = await fetchYouTube(
+    "YouTube player script",
+    playerUrl,
+    { credentials: "omit", cache: "no-store" },
+    (response) => response.text(),
+    30000
+  );
+  return {
+    playerUrl,
+    playerJs,
+    signatureTimestamp:
+      extractSignatureTimestamp(watchHtml) || extractSignatureTimestamp(playerJs),
+  };
 }
 
 function pickYouTubeProgressiveMp4(playerResponse) {
@@ -679,21 +798,25 @@ function pickYouTubeProgressiveMp4(playerResponse) {
   return mp4s[0] || null;
 }
 
-// No resolution cap — take the genuinely highest-quality stream. The only limit
-// is physical: ffmpeg.wasm has a 2 GB heap. The muxer mounts the inputs via
-// WORKERFS (read lazily from Blobs, never copied into the heap), so only the
-// muxed output occupies it — roughly a ~1.25 GB video ceiling, which covers true
-// 4K for typical-length videos. The picker takes the highest resolution that
-// fits; only extreme 8K / multi-GB (hours-long) 4K steps down, and the
-// progressive MP4 fallback still covers a remux that runs out of memory anyway.
+// Prefer the highest reliable browser-muxable stream. H.264-in-MP4 is much more
+// predictable in ffmpeg.wasm than AV1-in-MP4, and still beats YouTube's 360p
+// progressive fallback. The muxer mounts inputs via WORKERFS, so only the muxed
+// output occupies the 2 GB heap.
 const YT_MAX_MUX_HEIGHT = 4320;
 const YT_MAX_MUX_VIDEO_BYTES = 1280 * 1024 * 1024;
+const YT_MUX_CHUNK_CONCURRENCY = 3;
+
+function youtubeVideoCodecRank(format) {
+  const mime = String(format?.mimeType || "").toLowerCase();
+  if (mime.includes("avc1")) return 3;
+  if (mime.includes("hvc1") || mime.includes("hev1")) return 2;
+  if (mime.includes("av01")) return 1;
+  return 0;
+}
 
 // Pick the best directly-fetchable video-only + audio-only MP4 streams for the
-// offscreen ffmpeg step to merge — this yields far higher quality (up to 4K)
-// than YouTube's lone 360p progressive MP4. Prefer the highest resolution that
-// fits the memory budget, but never fail outright over a missing/oversized
-// stream — fall back to the smallest.
+// offscreen ffmpeg step to merge. Prefer the most compatible codec first, then
+// the highest resolution/bitrate that fits the memory budget.
 function pickYouTubeAdaptiveMux(playerResponse) {
   const formats = playerResponse?.streamingData?.adaptiveFormats || [];
   const direct = (format) =>
@@ -709,6 +832,7 @@ function pickYouTubeAdaptiveMux(playerResponse) {
     )
     .sort(
       (a, b) =>
+        youtubeVideoCodecRank(b) - youtubeVideoCodecRank(a) ||
         (Number(b.height) || 0) - (Number(a.height) || 0) ||
         (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0)
     );
@@ -729,50 +853,208 @@ function pickYouTubeAdaptiveMux(playerResponse) {
     .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0))[0];
 
   if (!video || !audio) return null;
-  return { videoUrl: video.url, audioUrl: audio.url };
+  return {
+    videoUrl: video.url,
+    audioUrl: audio.url,
+    videoBytes: bytesOf(video),
+    audioBytes: bytesOf(audio),
+    chunkConcurrency: YT_MUX_CHUNK_CONCURRENCY,
+  };
 }
 
-async function resolveYouTubeMedia(videoId) {
+function parseYouTubeFormatUrl(format) {
+  const cipher = new URLSearchParams(format?.signatureCipher || format?.cipher || "");
+  const rawUrl = format?.url || cipher.get("url");
+  if (!rawUrl) return null;
+
+  try {
+    return {
+      format,
+      url: new URL(rawUrl),
+      signature: cipher.get("s") || "",
+      signatureParam: cipher.get("sp") || "signature",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function youtubeGvsContentBinding(pageConfig, videoId) {
+  const experiments = JSON.stringify(pageConfig?.WEB_PLAYER_CONTEXT_CONFIGS || {});
+  if (/html5_generate_content_po_token(?:%3D|=)true/i.test(experiments)) {
+    return videoId;
+  }
+  return pageConfig?.INNERTUBE_CONTEXT?.client?.visitorData || videoId;
+}
+
+async function requestYouTubeHelper(
+  tabId,
+  frameId,
+  contentBinding,
+  player,
+  nChallenges,
+  sigChallenges,
+  onStage
+) {
+  if (!Number.isInteger(tabId)) throw new Error("YouTube tab was unavailable");
+  onStage("Getting token...");
+  const tokenResult = await chrome.tabs.sendMessage(
+    tabId,
+    { type: "XVD_YOUTUBE_HELPER_PAGE", contentBinding },
+    { frameId: Number.isInteger(frameId) ? frameId : 0 }
+  );
+  if (!tokenResult?.ok || !tokenResult.poToken) {
+    throw new Error(tokenResult?.error || "YouTube proof-token helper failed");
+  }
+
+  if (!nChallenges.length && !sigChallenges.length) {
+    return { poToken: tokenResult.poToken, nSolutions: {}, sigSolutions: {} };
+  }
+  onStage("Solving...");
+  await ensureOffscreen();
+  const solveResult = await chrome.runtime.sendMessage({
+    type: "XVD_YOUTUBE_SOLVE",
+    target: "offscreen",
+    playerUrl: player.playerUrl,
+    // Hand over the script already fetched here instead of downloading the
+    // multi-megabyte player a second time in the offscreen document.
+    playerJs: player.playerJs,
+    nChallenges,
+    sigChallenges,
+  });
+  if (!solveResult?.ok) {
+    throw new Error(solveResult?.error || "YouTube player challenge solver failed");
+  }
+  return {
+    poToken: tokenResult.poToken,
+    nSolutions: solveResult.nSolutions || {},
+    sigSolutions: solveResult.sigSolutions || {},
+  };
+}
+
+async function authorizeYouTubeFormats(
+  data,
+  pageConfig,
+  videoId,
+  player,
+  tabId,
+  frameId,
+  onStage
+) {
+  const formatEntries = [
+    ...(data?.streamingData?.formats || []),
+    ...(data?.streamingData?.adaptiveFormats || []),
+  ]
+    .map(parseYouTubeFormatUrl)
+    .filter(Boolean);
+  if (!formatEntries.length) throw new Error("No downloadable YouTube formats found");
+
+  const nChallenges = [
+    ...new Set(formatEntries.map((entry) => entry.url.searchParams.get("n")).filter(Boolean)),
+  ];
+  const sigChallenges = [
+    ...new Set(formatEntries.map((entry) => entry.signature).filter(Boolean)),
+  ];
+  const helper = await requestYouTubeHelper(
+    tabId,
+    frameId,
+    youtubeGvsContentBinding(pageConfig, videoId),
+    player,
+    nChallenges,
+    sigChallenges,
+    onStage
+  );
+
+  const authorizedByFormat = new Map();
+  for (const entry of formatEntries) {
+    if (entry.signature) {
+      const solved = helper.sigSolutions?.[entry.signature];
+      if (!solved) throw new Error("YouTube signature challenge could not be solved");
+      entry.url.searchParams.set(entry.signatureParam, solved);
+    }
+
+    const nValue = entry.url.searchParams.get("n");
+    if (nValue) {
+      const solved = helper.nSolutions?.[nValue];
+      if (!solved) throw new Error("YouTube stream challenge could not be solved");
+      entry.url.searchParams.set("n", solved);
+    }
+
+    entry.url.searchParams.set("pot", helper.poToken);
+    authorizedByFormat.set(entry.format, {
+      ...entry.format,
+      url: entry.url.href,
+      cipher: null,
+      signatureCipher: null,
+    });
+  }
+
+  const mapFormats = (formats) =>
+    (formats || []).map((format) => authorizedByFormat.get(format)).filter(Boolean);
+  return {
+    ...data,
+    streamingData: {
+      ...data.streamingData,
+      formats: mapFormats(data.streamingData?.formats),
+      adaptiveFormats: mapFormats(data.streamingData?.adaptiveFormats),
+    },
+  };
+}
+
+async function resolveYouTubeMedia(videoId, tabId, frameId, onStage = () => {}) {
   const id = sanitizeYouTubeVideoId(videoId);
   if (!id) throw new Error("Invalid YouTube video id");
+  onStage("Loading player...");
 
   const watchUrl =
-    "https://www.youtube.com/watch?v=" +
+    "https://m.youtube.com/watch?v=" +
     encodeURIComponent(id) +
-    "&bpctr=9999999999&has_verified=1";
-  // Anonymous (no cookies): the ANDROID_VR client expects a fresh visitor
-  // context, and signed-in web cookies make the player endpoint reject it.
-  const watchResponse = await fetch(watchUrl, {
-    credentials: "omit",
-    cache: "no-store",
-    headers: {
-      "Accept-Language": "en-US,en;q=0.9",
+    "&app=m&bpctr=9999999999&has_verified=1";
+  // Anonymous MWEB supplies normal HTTPS formats once each URL carries a fresh
+  // proof-of-origin token. The signed-in WEB client now exposes only SABR.
+  const watchHtml = await fetchYouTube(
+    "YouTube watch page",
+    watchUrl,
+    {
+      credentials: "omit",
+      cache: "no-store",
+      headers: {
+        "Accept-Language": "en-US,en;q=0.9",
+      },
     },
-  });
-  if (!watchResponse.ok) throw new Error("YouTube watch HTTP " + watchResponse.status);
-
-  const watchHtml = await watchResponse.text();
-  const visitorData =
-    extractYouTubeConfigValue(watchHtml, "VISITOR_DATA") ||
-    extractYouTubeConfigValue(watchHtml, "visitorData");
-  const signatureTimestamp = await fetchYouTubeSignatureTimestamp(watchHtml);
+    (response) => response.text()
+  );
+  const pageConfig = extractYouTubePageConfig(watchHtml);
+  const context = pageConfig?.INNERTUBE_CONTEXT;
+  const apiKey = pageConfig?.INNERTUBE_API_KEY;
+  const clientName = pageConfig?.INNERTUBE_CONTEXT_CLIENT_NAME;
+  const clientVersion = pageConfig?.INNERTUBE_CONTEXT_CLIENT_VERSION;
+  if (!context?.client || !apiKey || !clientVersion) {
+    throw new Error("YouTube MWEB client configuration was not found");
+  }
+  const player = await fetchYouTubePlayerSource(watchHtml);
+  const { signatureTimestamp } = player;
 
   const headers = {
     "Content-Type": "application/json",
-    "X-Youtube-Client-Name": "28",
-    "X-Youtube-Client-Version": YT_ANDROID_VR_CLIENT.clientVersion,
+    "X-Youtube-Client-Name": String(clientName || 2),
+    "X-Youtube-Client-Version": clientVersion,
   };
-  if (visitorData) headers["X-Goog-Visitor-Id"] = visitorData;
+  if (context.client.visitorData) {
+    headers["X-Goog-Visitor-Id"] = context.client.visitorData;
+  }
 
-  const playerResponse = await fetch(
-    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+  const data = await fetchYouTube(
+    "YouTube player",
+    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false&key=" +
+      encodeURIComponent(apiKey),
     {
       method: "POST",
       credentials: "omit",
       cache: "no-store",
       headers,
       body: JSON.stringify({
-        context: { client: YT_ANDROID_VR_CLIENT },
+        context,
         videoId: id,
         playbackContext: {
           contentPlaybackContext: {
@@ -785,13 +1067,9 @@ async function resolveYouTubeMedia(videoId) {
         contentCheckOk: true,
         racyCheckOk: true,
       }),
-    }
+    },
+    (response) => response.json()
   );
-  if (!playerResponse.ok) {
-    throw new Error("YouTube player HTTP " + playerResponse.status);
-  }
-
-  const data = await playerResponse.json();
   if (data?.playabilityStatus?.status && data.playabilityStatus.status !== "OK") {
     throw new Error(
       data.playabilityStatus.reason ||
@@ -799,14 +1077,29 @@ async function resolveYouTubeMedia(videoId) {
     );
   }
 
+  const authorized = await authorizeYouTubeFormats(
+    data,
+    pageConfig,
+    id,
+    player,
+    tabId,
+    frameId,
+    onStage
+  );
+
   // Prefer the higher-quality muxed adaptive streams (up to 4K). Keep the
   // progressive MP4, when present, as a fallback URL in case the in-browser
   // remux fails (e.g. ffmpeg runs out of memory).
-  const progressive = pickYouTubeProgressiveMp4(data);
-  const mux = pickYouTubeAdaptiveMux(data);
+  const progressive = pickYouTubeProgressiveMp4(authorized);
+  const mux = pickYouTubeAdaptiveMux(authorized);
 
-  if (mux) return { mux, url: progressive ? progressive.url : null };
-  if (progressive) return { url: progressive.url };
+  if (mux) {
+    return { mux, url: progressive ? progressive.url : null };
+  }
+
+  if (progressive) {
+    return { url: progressive.url };
+  }
 
   throw new Error("No downloadable YouTube MP4 found");
 }
@@ -877,6 +1170,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const jobId = ++jobSeq;
       jobs.set(jobId, {
         tabId: sender && sender.tab && sender.tab.id,
+        frameId: sender && sender.frameId,
         requestId: msg.requestId,
       });
 
