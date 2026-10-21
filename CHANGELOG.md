@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.56] - 2026-10-20
+
+### Fixed
+- X downloads now strip invisible Unicode format controls that Chrome rejects
+  in filenames and preserve the actual `chrome.downloads.download` error
+  instead of masking it as `Download blocked`.
+
 ## [1.11.55] - 2026-10-20
 
 ### Fixed

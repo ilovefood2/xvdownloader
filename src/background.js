@@ -263,6 +263,7 @@ function sanitizeName(s) {
     .replace(/[@#]/g, "") // drop handle/hashtag sigils
     .replace(/[\r\n\t]+/g, " ")
     .replace(/[\\/:*?"<>|]/g, "") // characters illegal in filenames
+    .replace(/\p{Cf}/gu, "") // Chrome rejects invisible format controls in download filenames
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "")
     .replace(/&gt;/g, "")
@@ -398,18 +399,14 @@ async function startDownload(meta, tweetId, jobId) {
   const prepared = await prepareViaOffscreen(meta, jobId, "omit");
   const filename = buildFilename(meta, tweetId, prepared.ext);
 
-  const id = await new Promise((resolve) =>
+  const download = await new Promise((resolve) =>
     chrome.downloads.download(
       { url: prepared.blobUrl, filename, saveAs: false },
-      resolve
+      (id) => resolve({ id, error: chrome.runtime.lastError && chrome.runtime.lastError.message })
     )
   );
-  if (id == null) {
-    throw new Error(
-      (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
-        "Download blocked"
-    );
-  }
+  if (download.id == null) throw new Error(download.error || "Download blocked");
+  const id = download.id;
   pendingRevokes.set(id, prepared.blobUrl);
   await waitForDownloadSettlement(id);
   return prepared.blobUrl;
