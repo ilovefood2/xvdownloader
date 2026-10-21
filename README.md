@@ -1,65 +1,107 @@
-# X Video Downloader
+# X Video Downloader — Safari port
 
-A Chrome (Manifest V3) extension that shows a **Download** button when your
-cursor is over a video.
+A Safari Web Extension port of the Chrome extension **XDownload / X Video
+Downloader**. It shows a **Download** button when your cursor is over a video on
+x.com (and other sites) and saves it as MP4, reusing the same HLS/ffmpeg.wasm
+pipeline as the Chrome original.
 
-The original X.com / twitter.com downloader remains in place: it reads X's own
-page data, handles sensitive / age-restricted videos, falls back to HLS when
-needed, and can use the bundled ffmpeg.wasm path for encrypted or MPEG-TS HLS
-streams.
+This repo is the **web-extension source plus an Xcode-project generator**. Safari
+extensions must ship inside a macOS/iOS app built with Xcode.
 
-Version 1.11.0 adds a separate generic website path for non-X pages. On other
-websites, the extension sniffs direct `.mp4` and `.m3u8` URLs from video
-elements, browser performance entries, and page `fetch` / XHR responses. It
-then reuses the same offscreen HLS/FFmpeg pipeline to save the result.
+> **Status:** verified on Xcode 26.6 / Safari 26 — the generator produces the
+> four-target project, both the macOS and iOS app schemes **build**, and the
+> built macOS app registers the embedded Safari Web Extension with the system.
+> Enabling and exercising it in Safari (hover → download) is the interactive step
+> left to you; see [`PORTING.md`](PORTING.md) for what that still needs to confirm.
 
-No API keys or third-party developer servers are involved.
+```
+xvdownloader-safar/
+├── Extension/               ← the Safari Web Extension (converter input)
+│   ├── manifest.json        ← MV3, adapted for Safari
+│   ├── src/                 ← background page, content scripts, pipeline, save bridge
+│   ├── vendor/ffmpeg/       ← bundled ffmpeg.wasm (unchanged)
+│   └── icons/
+├── AppScaffold/             ← branded container-app UI + native handler (overlay)
+├── make-xcode-project.sh    ← runs safari-web-extension-converter → Xcode project
+├── PORTING.md               ← exactly what changed from the Chrome version and why
+└── README.md                ← this file
+```
 
-## Install (unpacked / developer mode)
+## Requirements
 
-1. Open `chrome://extensions` in Chrome (or any Chromium browser).
-2. Toggle **Developer mode** on (top-right).
-3. Click **Load unpacked** and select this folder.
-4. Visit x.com or another website with a video.
-5. Hover over a video and click **Download**.
+- A **Mac with the full Xcode.app** (not just Command Line Tools). The converter
+  ships inside Xcode. Point the toolchain at it:
+  ```
+  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+  ```
+- **macOS 13+ / iOS 16+** to run; **macOS 14 / iOS 17 recommended**. The
+  extension relies on MV3 features that landed across Safari 16–17:
+  `world: "MAIN"` content scripts, `declarativeNetRequest` dynamic rules, and a
+  non-persistent background page. Older Safari will not run it correctly.
+- An **Apple Developer account** only if you want to run on a physical iPhone/iPad
+  or distribute. A free personal team is enough for local macOS testing.
 
-## Files
+## Build & run
 
-| File | Purpose |
-| --- | --- |
-| `manifest.json` | Extension manifest (MV3) |
-| `src/inject.js` | X.com page-context API sniffer |
-| `src/content.js` | X.com hover button |
-| `src/generic-sniffer.js` | Non-X website MP4/HLS URL sniffer |
-| `src/generic-content.js` | Non-X website hover button |
-| `src/hls.js` | Shared HLS/media pipeline (fetch, parse, concat, ffmpeg) |
-| `src/offscreen.html` / `offscreen.js` | Runs the pipeline and builds download blobs |
-| `vendor/ffmpeg/` | Bundled ffmpeg.wasm, lazy-loaded for encrypted / TS streams |
-| `test/hls-test.html` | Manual test harness for the HLS pipeline |
-| `src/background.js` | Resolves media and triggers downloads |
-| `icons/` | Toolbar / store icons |
+```bash
+# 1. Generate the Xcode project (macOS + iOS targets):
+APP_NAME="X Video Downloader" BUNDLE_ID="com.YOURNAME.xvideodownloader" \
+  ./make-xcode-project.sh
 
-## Notes and limitations
+# 2. Open it:
+open XcodeProject/*/*.xcodeproj      # or the .xcodeproj it prints
 
-- X.com behavior is handled by the original X-specific scripts.
-- Other websites are best-effort: direct MP4 and HLS playlists can work when
-  the page exposes their URLs to the browser.
-- Blob-only videos can work only when the underlying `.mp4` or `.m3u8` URL is
-  visible in page network activity.
-- Real DRM (Widevine/PlayReady/FairPlay) is not supported.
-- This extension is for downloading content you have the rights to. Respect
-  copyright and each website's terms.
+# 3. In Xcode: pick your Team under Signing & Capabilities on every target,
+#    select the macOS app scheme, and Run (⌘R).
+```
 
-## Testing the HLS pipeline
+Then enable it in Safari:
 
-To test encrypted/TS/fMP4 HLS handling without using a real website:
+1. Safari ▸ **Settings** ▸ **Extensions** ▸ turn on **X Video Downloader**.
+   - If it's hidden, enable **Settings ▸ Advanced ▸ Show features for web
+     developers**, then **Develop ▸ Allow Unsigned Extensions** (per Safari
+     launch, for locally-built/unsigned dev builds).
+2. Give it access to **All Websites** (it needs to reach video CDNs).
+3. Visit x.com or another site, hover a video, click **Download**.
 
-1. Load the extension, then open `chrome://extensions` and copy its ID.
-2. Visit `chrome-extension://<id>/test/hls-test.html`.
-3. Pick a preset, or paste any CORS-enabled `.m3u8`, and click **Start**.
+For iOS/iPadOS: select the iOS app scheme, run on a simulator or device, then
+enable the extension in **Settings ▸ Apps ▸ Safari ▸ Extensions**.
 
-It runs the same `src/hls.js` code used by real downloads.
+Want the app window branded instead of the stock placeholder? See
+[`AppScaffold/README.md`](AppScaffold/README.md).
+
+## What works, and the Safari-specific caveats
+
+The X.com path, the generic-site MP4/HLS sniffers, the pause/resume/cancel
+controls, progress reporting, and the encrypted/TS HLS ffmpeg pipeline are all
+ported. Because Safari's extension APIs differ from Chrome's, three things behave
+differently — full detail in [`PORTING.md`](PORTING.md):
+
+- **No offscreen document.** The media pipeline runs in a non-persistent
+  **background page** instead. (Functionally equivalent.)
+- **No manifest `world: "MAIN"`.** Safari ignores it, so the page-context
+  sniffers (`inject.js`, `generic-sniffer.js`) are injected as page `<script>`
+  tags by `src/main-world-loader.js` at document_start instead — same effect.
+- **No `chrome.downloads` API.** Finished bytes are streamed to the page and
+  saved via a synthetic `<a download>` click (see `src/download-bridge.js`).
+  Very large 4K files are buffered in memory during the hand-off. If a browser
+  ever declines the programmatic save because the user gesture has expired,
+  re-click Download.
+- **`declarativeNetRequest` header rules** (Referer/Origin spoofing for
+  Referer-gated CDNs) are kept but wrapped in try/catch; Safari's DNR limits and
+  request-header modification differ from Chrome's, so a few Referer-gated sites
+  that work in Chrome may not in Safari. Direct MP4 and standard HLS are
+  unaffected.
+- **Touch UX (iOS).** The button is hover-driven, which suits a trackpad/mouse.
+  On touch, reveal-on-hover is unreliable; a touch-first UI is a follow-up.
+
+## Not supported (same as the Chrome version)
+
+- Real DRM (Widevine/PlayReady/FairPlay).
+- Blob-only videos whose underlying `.mp4`/`.m3u8` URL never appears in network
+  activity.
 
 ## Privacy
 
-The extension collects no data. See the [Privacy Policy](PRIVACY.md).
+No data is collected; no third-party servers are involved. All fetching and
+media assembly happen locally in the extension.

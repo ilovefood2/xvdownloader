@@ -1,11 +1,37 @@
 /*
- * X Video Downloader — background service worker
+ * X Video Downloader — background page (Safari port).
  *
  * Resolves a tweet's video to a direct MP4 URL using X's public syndication
- * endpoint (cdn.syndication.twimg.com/tweet-result), then hands the URL to the
- * downloads API.
+ * endpoint (cdn.syndication.twimg.com/tweet-result), then assembles and saves
+ * the media.
+ *
+ * Safari port notes (vs. the Chrome MV3 service worker):
+ *   - Runs as a non-persistent background *page* (background.html), not a
+ *     service worker, so URL.createObjectURL and the ffmpeg.wasm Worker work.
+ *   - The offscreen document is gone; the media pipeline is imported and called
+ *     directly (see pipeline.js).
+ *   - There is no chrome.downloads API in Safari, so finished bytes are streamed
+ *     to the page's content script, which triggers an <a download> save (see
+ *     deliverBlobToTab() below and download-bridge.js).
  */
 "use strict";
+
+import { prepareDownload, pauseJob, resumeJob, cancelJob } from "./pipeline.js";
+import { configureProxy, setProxyTab, smartFetch } from "./net.js";
+
+// Safari exposes the WebExtension API as `browser`; `chrome` is an alias on
+// Safari 15.4+. Prefer whichever exists so the same code runs on both engines.
+const chrome = globalThis.chrome || globalThis.browser;
+
+// Let the pipeline fall back to a page-context fetch (via the originating tab)
+// when a gated CDN 403s our extension-origin request — see net.js.
+configureProxy((tabId, frameId, message) =>
+  chrome.tabs.sendMessage(
+    tabId,
+    message,
+    frameId != null ? { frameId } : undefined
+  )
+);
 
 // YouTube's InnerTube player endpoint (youtubei/v1/player) returns HTTP 403 to
 // any request that carries an Origin header — and Chrome forces an
@@ -13,7 +39,7 @@
 // makes (it's a forbidden header, so it can't be removed from fetch() itself).
 // Strip it via declarativeNetRequest, scoped to the player endpoint and excluded
 // for youtube.com-initiated requests so the user's own YouTube playback is
-// untouched. Media requests get their own per-download rule below.
+// untouched. (googlevideo media fetches are fine with the Origin header.)
 const YT_ORIGIN_RULE_ID = 4801;
 async function ensureYouTubeOriginRule() {
   try {
@@ -182,9 +208,7 @@ function bestMp4(variants) {
     (v) => v && (v.content_type === "video/mp4" || v.type === "video/mp4") && v.url
   );
   if (!mp4s.length) return null;
-  mp4s.sort(
-    (a, b) => (b.bitrate || b.bit_rate || 0) - (a.bitrate || a.bit_rate || 0)
-  );
+  mp4s.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
   return mp4s[0].url;
 }
 
@@ -287,103 +311,117 @@ function buildFilename(meta, tweetId, ext) {
   return `${base}.${ext || "mp4"}`;
 }
 
-// --- HLS assembly via an offscreen document -------------------------------
-// Service workers can't create blob URLs, so segment merging happens in an
-// offscreen document (which also gets host-permission CORS for fetches).
-let creatingOffscreen = null;
-const OFFSCREEN_VERSION = "1.11.54";
-
-async function ensureOffscreen() {
-  if (await chrome.offscreen.hasDocument()) {
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: "XVD_OFFSCREEN_VERSION",
-        target: "offscreen",
-      });
-      if (response?.version === OFFSCREEN_VERSION) return;
-    } catch {
-      /* stale offscreen document has no version responder */
-    }
-    await chrome.offscreen.closeDocument();
-  }
-  if (!creatingOffscreen) {
-    creatingOffscreen = chrome.offscreen.createDocument({
-      url: `src/offscreen.html?v=${OFFSCREEN_VERSION}`,
-      reasons: ["BLOBS"],
-      justification: "Merge HLS video segments into a downloadable file.",
-    });
-  }
-  try {
-    await creatingOffscreen;
-  } finally {
-    creatingOffscreen = null;
-  }
-}
-
-// Fetch the media in the offscreen document and get back a blob URL to
-// download. Handles both direct MP4 and HLS.
-async function prepareViaOffscreen(meta, jobId, credentials, options = {}) {
-  await ensureOffscreen();
+// --- HLS assembly via the in-page pipeline --------------------------------
+// Under Chrome this ran in an offscreen document reached over runtime messaging.
+// Safari has no offscreen API, so the pipeline (pipeline.js) is imported and
+// called directly here in the background page — same origin, so it can fetch
+// cross-origin media with host permissions and build blobs.
+//
+// Fetch + assemble the media and get back the finished bytes. Progress is
+// forwarded to the button that started the job via forwardProgress().
+async function prepareViaPipeline(meta, jobId, credentials, options = {}) {
   // No overall timeout here: a download can be paused indefinitely by the user.
-  // Per-request timeouts in the offscreen doc still guard against dead requests.
-  const res = await chrome.runtime.sendMessage({
-    type: "XVD_PREPARE",
-    target: "offscreen",
-    jobId,
-    direct: meta.url || null,
-    directSingleGet: meta.directSingleGet === true,
-    hls: meta.hls || null,
-    mux: meta.mux || null,
-    credentials,
-    allowTsFallback: options.allowTsFallback === true,
-  });
-  if (!res || !res.ok) throw new Error((res && res.error) || "Download failed");
-  return res; // { ok, blobUrl, ext }
+  // Per-request timeouts inside the pipeline still guard against dead requests.
+  const res = await prepareDownload(
+    {
+      jobId,
+      direct: meta.url || null,
+      hls: meta.hls || null,
+      mux: meta.mux || null,
+      credentials,
+      allowTsFallback: options.allowTsFallback === true,
+    },
+    { onProgress: (done, total, phase) => forwardProgress(jobId, done, total, phase) }
+  );
+  return res; // { blob, ext }
 }
 
-// Revoke blob URLs once their download settles so memory is reclaimed.
-const pendingRevokes = new Map(); // downloadId -> blobUrl
-const pendingDownloadSettlements = new Map(); // downloadId -> { resolve, reject }
-
-function revokePendingBlob(downloadId) {
-  const blobUrl = pendingRevokes.get(downloadId);
-  if (!blobUrl) return;
-  pendingRevokes.delete(downloadId);
-  chrome.runtime
-    .sendMessage({ type: "XVD_REVOKE", target: "offscreen", blobUrl })
+// Relay pipeline progress to the tab/button that started the download.
+function forwardProgress(jobId, done, total, phase) {
+  const job = jobs.get(jobId);
+  if (!job || job.tabId == null) return;
+  chrome.tabs
+    .sendMessage(job.tabId, {
+      type: "XVD_PROGRESS",
+      requestId: job.requestId,
+      done,
+      total,
+      phase,
+    })
     .catch(() => {});
 }
 
-chrome.downloads.onChanged.addListener((delta) => {
-  if (!delta || !delta.state) return;
-  const state = delta.state.current;
-  if (state !== "complete" && state !== "interrupted") return;
-
-  revokePendingBlob(delta.id);
-
-  const settlement = pendingDownloadSettlements.get(delta.id);
-  if (settlement) {
-    pendingDownloadSettlements.delete(delta.id);
-    if (state === "complete") settlement.resolve();
-    else settlement.reject(new Error(delta.error?.current || "Browser download interrupted"));
+// MIME type to stamp on the delivered blob, from the pipeline-reported ext.
+function mimeForExt(ext) {
+  switch ((ext || "").toLowerCase().replace(/^\./, "")) {
+    case "mp4":
+    case "m4v":
+      return "video/mp4";
+    case "webm":
+      return "video/webm";
+    case "ts":
+      return "video/mp2t";
+    case "m4a":
+      return "audio/mp4";
+    default:
+      return "application/octet-stream";
   }
-});
+}
 
-function waitForDownloadSettlement(downloadId) {
-  return new Promise((resolve, reject) => {
-    pendingDownloadSettlements.set(downloadId, { resolve, reject });
-    chrome.downloads.search({ id: downloadId }, (items) => {
-      const item = items && items[0];
-      if (!item || item.state === "in_progress") return;
+// Base64-encode a byte range without building one giant argument list.
+function bytesToBase64(bytes) {
+  let binary = "";
+  const SUB = 0x8000; // 32 KB per fromCharCode call
+  for (let i = 0; i < bytes.length; i += SUB) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + SUB));
+  }
+  return btoa(binary);
+}
 
-      const pending = pendingDownloadSettlements.get(downloadId);
-      if (!pending) return;
-      pendingDownloadSettlements.delete(downloadId);
-      revokePendingBlob(downloadId);
-      if (item.state === "complete") pending.resolve();
-      else pending.reject(new Error(item.error || "Browser download interrupted"));
-    });
+// Stand-in for chrome.downloads.download (absent in Safari): stream the finished
+// bytes to the page's content script, which rebuilds the Blob and triggers an
+// <a download> save. Chunked + awaited so a 4K video doesn't blow past the
+// messaging size limit and so the receiver applies backpressure.
+const SAVE_CHUNK_BYTES = 512 * 1024;
+
+async function deliverBlobToTab(jobId, blob, filename, ext) {
+  const job = jobs.get(jobId);
+  const tabId = job && job.tabId;
+  const frameId = job && job.frameId;
+  const saveId = (job && job.requestId) || "xvd-" + jobId;
+  if (tabId == null) throw new Error("No tab to receive the download");
+
+  const send = async (message) => {
+    const res = await chrome.tabs.sendMessage(
+      tabId,
+      message,
+      frameId != null ? { frameId } : undefined
+    );
+    if (res && res.ok === false) {
+      throw new Error(res.error || "Save was rejected by the page");
+    }
+    return res;
+  };
+
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  await send({
+    type: "XVD_SAVE_BEGIN",
+    saveId,
+    filename,
+    mime: blob.type || mimeForExt(ext),
   });
+  try {
+    let seq = 0;
+    for (let off = 0; off < buf.length; off += SAVE_CHUNK_BYTES) {
+      const chunk = buf.subarray(off, off + SAVE_CHUNK_BYTES);
+      await send({ type: "XVD_SAVE_CHUNK", saveId, seq: seq++, b64: bytesToBase64(chunk) });
+    }
+    // An empty file still needs a BEGIN/END so the receiver saves something.
+    await send({ type: "XVD_SAVE_END", saveId });
+  } catch (e) {
+    chrome.tabs.sendMessage(tabId, { type: "XVD_SAVE_ABORT", saveId }).catch(() => {});
+    throw e;
+  }
 }
 
 async function startDownload(meta, tweetId, jobId) {
@@ -394,34 +432,18 @@ async function startDownload(meta, tweetId, jobId) {
     src: meta.url || meta.hls,
   });
 
-  // X CDN URLs are self-authorizing; cookies break CORS on ACAO: * responses.
-  const prepared = await prepareViaOffscreen(meta, jobId, "omit");
+  // Always fetch the bytes from the extension context, then hand the blob to the
+  // page's content script to save (Safari has no chrome.downloads API).
+  // X CDN URLs are self-authorizing; cookies break Safari CORS on ACAO: *.
+  const prepared = await prepareViaPipeline(meta, jobId, "omit");
   const filename = buildFilename(meta, tweetId, prepared.ext);
 
-  const id = await new Promise((resolve) =>
-    chrome.downloads.download(
-      { url: prepared.blobUrl, filename, saveAs: false },
-      resolve
-    )
-  );
-  if (id == null) {
-    throw new Error(
-      (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
-        "Download blocked"
-    );
-  }
-  pendingRevokes.set(id, prepared.blobUrl);
-  await waitForDownloadSettlement(id);
-  return prepared.blobUrl;
+  await deliverBlobToTab(jobId, prepared.blob, filename, prepared.ext);
+  return filename;
 }
 
 async function startGenericDownload(meta, requestedFilename, jobId) {
-  const source = {
-    url: meta.url || null,
-    directSingleGet: meta.directSingleGet === true,
-    hls: meta.hls || null,
-    mux: meta.mux || null,
-  };
+  const source = { url: meta.url || null, hls: meta.hls || null, mux: meta.mux || null };
   // Most sites need cookies for restricted streams; YouTube's signed googlevideo
   // URLs are issued for an anonymous context and break if cookies are attached.
   let credentials = "include";
@@ -429,23 +451,14 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
   if (meta.youtubeVideoId) {
     try {
       console.log("[XVD] resolving YouTube media", meta.youtubeVideoId);
-      const resolved = await resolveYouTubeMedia(
-        meta.youtubeVideoId,
-        jobs.get(jobId)?.tabId,
-        jobs.get(jobId)?.frameId,
-        (text) => reportStage(jobId, text)
-      );
+      const resolved = await resolveYouTubeMedia(meta.youtubeVideoId);
       source.url = resolved.url || null;
-      source.directSingleGet = resolved.directSingleGet === true;
       source.mux = resolved.mux || null;
       source.hls = null;
       credentials = "omit";
-      reportStage(jobId, "Starting...");
     } catch (e) {
       console.warn("[XVD] YouTube resolver failed:", e.message);
-      // Sniffed googlevideo URLs do not carry the fresh proof token. Retrying
-      // one after authorization fails only adds a second, misleading HTTP 403.
-      throw e;
+      if (!source.url && !source.hls && !source.mux) throw e;
     }
   }
 
@@ -458,11 +471,10 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
     src: source.mux ? source.mux.videoUrl : source.hls || source.url,
   });
 
-  // Spoof the page Referer and remove Chrome's forced extension Origin for
-  // extension-owned media requests. This is scoped to the media host and to
-  // tabless extension requests, so it does not affect the user's playback.
+  // YouTube uses its own anonymous googlevideo URLs; everything else may be
+  // Referer-gated, so spoof the page Referer/Origin for our fetches.
   const refererActive =
-    meta.pageUrl
+    !meta.youtubeVideoId && meta.pageUrl
       ? await setMediaRefererRule(jobId, meta.pageUrl, [
           source.hls,
           source.url,
@@ -475,10 +487,9 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
   try {
     let prepared;
     try {
-      prepared = await prepareViaOffscreen(
+      prepared = await prepareViaPipeline(
         {
           url: source.hls || source.mux ? null : source.url,
-          directSingleGet: source.directSingleGet,
           hls: source.hls || null,
           mux: source.mux || null,
         },
@@ -491,14 +502,10 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
         // The adaptive remux failed (often ffmpeg OOM) — fall back to the
         // progressive MP4 so the download still succeeds at lower quality.
         console.log("[XVD] YouTube mux failed, falling back to progressive MP4:", e.message);
-        prepared = await prepareViaOffscreen(
-          { url: source.url, directSingleGet: source.directSingleGet, hls: null, mux: null },
-          jobId,
-          credentials
-        );
+        prepared = await prepareViaPipeline({ url: source.url, hls: null, mux: null }, jobId, credentials);
       } else if (source.hls && source.url) {
         console.log("[XVD] generic HLS failed, falling back to direct media:", e.message);
-        prepared = await prepareViaOffscreen({ url: source.url, hls: null }, jobId, credentials);
+        prepared = await prepareViaPipeline({ url: source.url, hls: null }, jobId, credentials);
       } else {
         throw e;
       }
@@ -506,21 +513,8 @@ async function startGenericDownload(meta, requestedFilename, jobId) {
 
     const filename = buildGenericFilename(requestedFilename, prepared.ext);
 
-    const id = await new Promise((resolve) =>
-      chrome.downloads.download(
-        { url: prepared.blobUrl, filename, saveAs: false },
-        resolve
-      )
-    );
-    if (id == null) {
-      throw new Error(
-        (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
-          "Download blocked"
-      );
-    }
-    pendingRevokes.set(id, prepared.blobUrl);
-    await waitForDownloadSettlement(id);
-    return prepared.blobUrl;
+    await deliverBlobToTab(jobId, prepared.blob, filename, prepared.ext);
+    return filename;
   } finally {
     if (refererActive) await clearMediaRefererRule(jobId);
   }
@@ -654,27 +648,20 @@ function buildGenericFilename(requestedFilename, ext) {
   return `${base}.${extension}`;
 }
 
-// Each YouTube authorization request gets a deadline: a stalled fetch must end
-// in a named error instead of leaving the button on "Authorizing..." forever.
-async function fetchYouTube(label, url, options, read, ms = 20000) {
-  try {
-    const response = await fetch(url, { ...options, signal: AbortSignal.timeout(ms) });
-    if (!response.ok) throw new Error(label + " HTTP " + response.status);
-    return await read(response);
-  } catch (e) {
-    if (e?.name === "TimeoutError") throw new Error(label + " timed out");
-    throw e;
-  }
-}
-
-// Tell the tab which authorization step is running, so a slow step is visible.
-function reportStage(jobId, text) {
-  const job = jobs.get(jobId);
-  if (!job || job.tabId == null) return;
-  chrome.tabs
-    .sendMessage(job.tabId, { type: "XVD_STAGE", requestId: job.requestId, text })
-    .catch(() => {});
-}
+const YT_ANDROID_VR_CLIENT = {
+  clientName: "ANDROID_VR",
+  clientVersion: "1.65.10",
+  deviceMake: "Oculus",
+  deviceModel: "Quest 3",
+  androidSdkVersion: 32,
+  userAgent:
+    "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+  osName: "Android",
+  osVersion: "12L",
+  hl: "en",
+  timeZone: "UTC",
+  utcOffsetMinutes: 0,
+};
 
 function sanitizeYouTubeVideoId(value) {
   const id = String(value || "").trim();
@@ -692,44 +679,6 @@ function decodeYouTubeString(value) {
 function extractYouTubeConfigValue(text, key) {
   const match = text.match(new RegExp(`"${key}"\\s*:\\s*"([^"]+)"`));
   return match ? decodeYouTubeString(match[1]) : "";
-}
-
-function extractYouTubeObjectAt(text, markerIndex) {
-  const start = text.indexOf("{", markerIndex);
-  if (start < 0) return "";
-
-  let depth = 0;
-  let quote = "";
-  let escaped = false;
-  for (let i = start; i < text.length; i++) {
-    const char = text[i];
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === quote) quote = "";
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-    } else if (char === "{") {
-      depth++;
-    } else if (char === "}" && --depth === 0) {
-      return text.slice(start, i + 1);
-    }
-  }
-  return "";
-}
-
-function extractYouTubePageConfig(text) {
-  const contextIndex = text.indexOf('"INNERTUBE_CONTEXT"');
-  const markerIndex = text.lastIndexOf("ytcfg.set(", contextIndex);
-  if (contextIndex < 0 || markerIndex < 0) return null;
-
-  try {
-    return JSON.parse(extractYouTubeObjectAt(text, markerIndex));
-  } catch {
-    return null;
-  }
 }
 
 function extractYouTubePlayerPath(text) {
@@ -754,30 +703,21 @@ function extractSignatureTimestamp(text) {
   return Number.isFinite(value) && value >= 10000 ? value : 0;
 }
 
-async function fetchYouTubePlayerSource(watchHtml) {
+async function fetchYouTubeSignatureTimestamp(watchHtml) {
+  const inlineValue = extractSignatureTimestamp(watchHtml);
+  if (inlineValue) return inlineValue;
+
   const playerPath = extractYouTubePlayerPath(watchHtml);
-  if (!playerPath) {
-    return {
-      playerUrl: "",
-      playerJs: "",
-      signatureTimestamp: extractSignatureTimestamp(watchHtml),
-    };
-  }
+  if (!playerPath) return 0;
 
   const playerUrl = new URL(playerPath, "https://www.youtube.com").href;
-  const playerJs = await fetchYouTube(
-    "YouTube player script",
-    playerUrl,
-    { credentials: "omit", cache: "no-store" },
-    (response) => response.text(),
-    30000
-  );
-  return {
-    playerUrl,
-    playerJs,
-    signatureTimestamp:
-      extractSignatureTimestamp(watchHtml) || extractSignatureTimestamp(playerJs),
-  };
+  const response = await smartFetch(playerUrl, {
+    credentials: "omit",
+    cache: "no-store",
+  });
+  if (!response.ok) return 0;
+
+  return extractSignatureTimestamp(await response.text());
 }
 
 function pickYouTubeProgressiveMp4(playerResponse) {
@@ -798,25 +738,21 @@ function pickYouTubeProgressiveMp4(playerResponse) {
   return mp4s[0] || null;
 }
 
-// Prefer the highest reliable browser-muxable stream. H.264-in-MP4 is much more
-// predictable in ffmpeg.wasm than AV1-in-MP4, and still beats YouTube's 360p
-// progressive fallback. The muxer mounts inputs via WORKERFS, so only the muxed
-// output occupies the 2 GB heap.
+// No resolution cap — take the genuinely highest-quality stream. The only limit
+// is physical: ffmpeg.wasm has a 2 GB heap. The muxer mounts the inputs via
+// WORKERFS (read lazily from Blobs, never copied into the heap), so only the
+// muxed output occupies it — roughly a ~1.25 GB video ceiling, which covers true
+// 4K for typical-length videos. The picker takes the highest resolution that
+// fits; only extreme 8K / multi-GB (hours-long) 4K steps down, and the
+// progressive MP4 fallback still covers a remux that runs out of memory anyway.
 const YT_MAX_MUX_HEIGHT = 4320;
 const YT_MAX_MUX_VIDEO_BYTES = 1280 * 1024 * 1024;
-const YT_MUX_CHUNK_CONCURRENCY = 3;
-
-function youtubeVideoCodecRank(format) {
-  const mime = String(format?.mimeType || "").toLowerCase();
-  if (mime.includes("avc1")) return 3;
-  if (mime.includes("hvc1") || mime.includes("hev1")) return 2;
-  if (mime.includes("av01")) return 1;
-  return 0;
-}
 
 // Pick the best directly-fetchable video-only + audio-only MP4 streams for the
-// offscreen ffmpeg step to merge. Prefer the most compatible codec first, then
-// the highest resolution/bitrate that fits the memory budget.
+// offscreen ffmpeg step to merge — this yields far higher quality (up to 4K)
+// than YouTube's lone 360p progressive MP4. Prefer the highest resolution that
+// fits the memory budget, but never fail outright over a missing/oversized
+// stream — fall back to the smallest.
 function pickYouTubeAdaptiveMux(playerResponse) {
   const formats = playerResponse?.streamingData?.adaptiveFormats || [];
   const direct = (format) =>
@@ -832,7 +768,6 @@ function pickYouTubeAdaptiveMux(playerResponse) {
     )
     .sort(
       (a, b) =>
-        youtubeVideoCodecRank(b) - youtubeVideoCodecRank(a) ||
         (Number(b.height) || 0) - (Number(a.height) || 0) ||
         (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0)
     );
@@ -853,208 +788,50 @@ function pickYouTubeAdaptiveMux(playerResponse) {
     .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0))[0];
 
   if (!video || !audio) return null;
-  return {
-    videoUrl: video.url,
-    audioUrl: audio.url,
-    videoBytes: bytesOf(video),
-    audioBytes: bytesOf(audio),
-    chunkConcurrency: YT_MUX_CHUNK_CONCURRENCY,
-  };
+  return { videoUrl: video.url, audioUrl: audio.url };
 }
 
-function parseYouTubeFormatUrl(format) {
-  const cipher = new URLSearchParams(format?.signatureCipher || format?.cipher || "");
-  const rawUrl = format?.url || cipher.get("url");
-  if (!rawUrl) return null;
-
-  try {
-    return {
-      format,
-      url: new URL(rawUrl),
-      signature: cipher.get("s") || "",
-      signatureParam: cipher.get("sp") || "signature",
-    };
-  } catch {
-    return null;
-  }
-}
-
-function youtubeGvsContentBinding(pageConfig, videoId) {
-  const experiments = JSON.stringify(pageConfig?.WEB_PLAYER_CONTEXT_CONFIGS || {});
-  if (/html5_generate_content_po_token(?:%3D|=)true/i.test(experiments)) {
-    return videoId;
-  }
-  return pageConfig?.INNERTUBE_CONTEXT?.client?.visitorData || videoId;
-}
-
-async function requestYouTubeHelper(
-  tabId,
-  frameId,
-  contentBinding,
-  player,
-  nChallenges,
-  sigChallenges,
-  onStage
-) {
-  if (!Number.isInteger(tabId)) throw new Error("YouTube tab was unavailable");
-  onStage("Getting token...");
-  const tokenResult = await chrome.tabs.sendMessage(
-    tabId,
-    { type: "XVD_YOUTUBE_HELPER_PAGE", contentBinding },
-    { frameId: Number.isInteger(frameId) ? frameId : 0 }
-  );
-  if (!tokenResult?.ok || !tokenResult.poToken) {
-    throw new Error(tokenResult?.error || "YouTube proof-token helper failed");
-  }
-
-  if (!nChallenges.length && !sigChallenges.length) {
-    return { poToken: tokenResult.poToken, nSolutions: {}, sigSolutions: {} };
-  }
-  onStage("Solving...");
-  await ensureOffscreen();
-  const solveResult = await chrome.runtime.sendMessage({
-    type: "XVD_YOUTUBE_SOLVE",
-    target: "offscreen",
-    playerUrl: player.playerUrl,
-    // Hand over the script already fetched here instead of downloading the
-    // multi-megabyte player a second time in the offscreen document.
-    playerJs: player.playerJs,
-    nChallenges,
-    sigChallenges,
-  });
-  if (!solveResult?.ok) {
-    throw new Error(solveResult?.error || "YouTube player challenge solver failed");
-  }
-  return {
-    poToken: tokenResult.poToken,
-    nSolutions: solveResult.nSolutions || {},
-    sigSolutions: solveResult.sigSolutions || {},
-  };
-}
-
-async function authorizeYouTubeFormats(
-  data,
-  pageConfig,
-  videoId,
-  player,
-  tabId,
-  frameId,
-  onStage
-) {
-  const formatEntries = [
-    ...(data?.streamingData?.formats || []),
-    ...(data?.streamingData?.adaptiveFormats || []),
-  ]
-    .map(parseYouTubeFormatUrl)
-    .filter(Boolean);
-  if (!formatEntries.length) throw new Error("No downloadable YouTube formats found");
-
-  const nChallenges = [
-    ...new Set(formatEntries.map((entry) => entry.url.searchParams.get("n")).filter(Boolean)),
-  ];
-  const sigChallenges = [
-    ...new Set(formatEntries.map((entry) => entry.signature).filter(Boolean)),
-  ];
-  const helper = await requestYouTubeHelper(
-    tabId,
-    frameId,
-    youtubeGvsContentBinding(pageConfig, videoId),
-    player,
-    nChallenges,
-    sigChallenges,
-    onStage
-  );
-
-  const authorizedByFormat = new Map();
-  for (const entry of formatEntries) {
-    if (entry.signature) {
-      const solved = helper.sigSolutions?.[entry.signature];
-      if (!solved) throw new Error("YouTube signature challenge could not be solved");
-      entry.url.searchParams.set(entry.signatureParam, solved);
-    }
-
-    const nValue = entry.url.searchParams.get("n");
-    if (nValue) {
-      const solved = helper.nSolutions?.[nValue];
-      if (!solved) throw new Error("YouTube stream challenge could not be solved");
-      entry.url.searchParams.set("n", solved);
-    }
-
-    entry.url.searchParams.set("pot", helper.poToken);
-    authorizedByFormat.set(entry.format, {
-      ...entry.format,
-      url: entry.url.href,
-      cipher: null,
-      signatureCipher: null,
-    });
-  }
-
-  const mapFormats = (formats) =>
-    (formats || []).map((format) => authorizedByFormat.get(format)).filter(Boolean);
-  return {
-    ...data,
-    streamingData: {
-      ...data.streamingData,
-      formats: mapFormats(data.streamingData?.formats),
-      adaptiveFormats: mapFormats(data.streamingData?.adaptiveFormats),
-    },
-  };
-}
-
-async function resolveYouTubeMedia(videoId, tabId, frameId, onStage = () => {}) {
+async function resolveYouTubeMedia(videoId) {
   const id = sanitizeYouTubeVideoId(videoId);
   if (!id) throw new Error("Invalid YouTube video id");
-  onStage("Loading player...");
 
   const watchUrl =
-    "https://m.youtube.com/watch?v=" +
+    "https://www.youtube.com/watch?v=" +
     encodeURIComponent(id) +
-    "&app=m&bpctr=9999999999&has_verified=1";
-  // Anonymous MWEB supplies normal HTTPS formats once each URL carries a fresh
-  // proof-of-origin token. The signed-in WEB client now exposes only SABR.
-  const watchHtml = await fetchYouTube(
-    "YouTube watch page",
-    watchUrl,
-    {
-      credentials: "omit",
-      cache: "no-store",
-      headers: {
-        "Accept-Language": "en-US,en;q=0.9",
-      },
+    "&bpctr=9999999999&has_verified=1";
+  // Anonymous (no cookies): the ANDROID_VR client expects a fresh visitor
+  // context, and signed-in web cookies make the player endpoint reject it.
+  const watchResponse = await smartFetch(watchUrl, {
+    credentials: "omit",
+    cache: "no-store",
+    headers: {
+      "Accept-Language": "en-US,en;q=0.9",
     },
-    (response) => response.text()
-  );
-  const pageConfig = extractYouTubePageConfig(watchHtml);
-  const context = pageConfig?.INNERTUBE_CONTEXT;
-  const apiKey = pageConfig?.INNERTUBE_API_KEY;
-  const clientName = pageConfig?.INNERTUBE_CONTEXT_CLIENT_NAME;
-  const clientVersion = pageConfig?.INNERTUBE_CONTEXT_CLIENT_VERSION;
-  if (!context?.client || !apiKey || !clientVersion) {
-    throw new Error("YouTube MWEB client configuration was not found");
-  }
-  const player = await fetchYouTubePlayerSource(watchHtml);
-  const { signatureTimestamp } = player;
+  });
+  if (!watchResponse.ok) throw new Error("YouTube watch HTTP " + watchResponse.status);
+
+  const watchHtml = await watchResponse.text();
+  const visitorData =
+    extractYouTubeConfigValue(watchHtml, "VISITOR_DATA") ||
+    extractYouTubeConfigValue(watchHtml, "visitorData");
+  const signatureTimestamp = await fetchYouTubeSignatureTimestamp(watchHtml);
 
   const headers = {
     "Content-Type": "application/json",
-    "X-Youtube-Client-Name": String(clientName || 2),
-    "X-Youtube-Client-Version": clientVersion,
+    "X-Youtube-Client-Name": "28",
+    "X-Youtube-Client-Version": YT_ANDROID_VR_CLIENT.clientVersion,
   };
-  if (context.client.visitorData) {
-    headers["X-Goog-Visitor-Id"] = context.client.visitorData;
-  }
+  if (visitorData) headers["X-Goog-Visitor-Id"] = visitorData;
 
-  const data = await fetchYouTube(
-    "YouTube player",
-    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false&key=" +
-      encodeURIComponent(apiKey),
+  const playerResponse = await smartFetch(
+    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
     {
       method: "POST",
       credentials: "omit",
       cache: "no-store",
       headers,
       body: JSON.stringify({
-        context,
+        context: { client: YT_ANDROID_VR_CLIENT },
         videoId: id,
         playbackContext: {
           contentPlaybackContext: {
@@ -1067,9 +844,13 @@ async function resolveYouTubeMedia(videoId, tabId, frameId, onStage = () => {}) 
         contentCheckOk: true,
         racyCheckOk: true,
       }),
-    },
-    (response) => response.json()
+    }
   );
+  if (!playerResponse.ok) {
+    throw new Error("YouTube player HTTP " + playerResponse.status);
+  }
+
+  const data = await playerResponse.json();
   if (data?.playabilityStatus?.status && data.playabilityStatus.status !== "OK") {
     throw new Error(
       data.playabilityStatus.reason ||
@@ -1077,57 +858,27 @@ async function resolveYouTubeMedia(videoId, tabId, frameId, onStage = () => {}) 
     );
   }
 
-  const authorized = await authorizeYouTubeFormats(
-    data,
-    pageConfig,
-    id,
-    player,
-    tabId,
-    frameId,
-    onStage
-  );
-
   // Prefer the higher-quality muxed adaptive streams (up to 4K). Keep the
   // progressive MP4, when present, as a fallback URL in case the in-browser
   // remux fails (e.g. ffmpeg runs out of memory).
-  const progressive = pickYouTubeProgressiveMp4(authorized);
-  const mux = pickYouTubeAdaptiveMux(authorized);
+  const progressive = pickYouTubeProgressiveMp4(data);
+  const mux = pickYouTubeAdaptiveMux(data);
 
-  if (mux) {
-    return { mux, url: progressive ? progressive.url : null };
-  }
-
-  if (progressive) {
-    return { url: progressive.url };
-  }
+  if (mux) return { mux, url: progressive ? progressive.url : null };
+  if (progressive) return { url: progressive.url };
 
   throw new Error("No downloadable YouTube MP4 found");
 }
 
-// Active jobs, so segment-progress from the offscreen doc can be forwarded to
-// the tab/button that started the download.
+// Active jobs, so pipeline progress can be forwarded to the tab/button that
+// started the download. (Declared with var so it's hoisted above the pipeline
+// helpers that reference it earlier in the file.)
 let jobSeq = 0;
-const jobs = new Map(); // jobId -> { tabId, requestId }
+var jobs = new Map(); // jobId -> { tabId, requestId }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // Progress relayed from the offscreen document → forward to the origin tab.
-  if (msg && msg.type === "XVD_PROGRESS") {
-    const job = jobs.get(msg.jobId);
-    if (job && job.tabId != null) {
-      chrome.tabs
-        .sendMessage(job.tabId, {
-          type: "XVD_PROGRESS",
-          requestId: job.requestId,
-          done: msg.done,
-          total: msg.total,
-          phase: msg.phase,
-        })
-        .catch(() => {});
-    }
-    return false;
-  }
-
-  // Pause/resume/cancel from a button → look up the job and relay to offscreen.
+  // Pause/resume/cancel from a button → look up the job and drive the pipeline
+  // directly (the pipeline now runs in this same background page).
   if (
     msg &&
     (msg.type === "XVD_PAUSE" ||
@@ -1136,9 +887,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   ) {
     for (const [jobId, job] of jobs) {
       if (job.requestId === msg.requestId) {
-        chrome.runtime
-          .sendMessage({ type: msg.type, target: "offscreen", jobId })
-          .catch(() => {});
+        if (msg.type === "XVD_PAUSE") pauseJob(jobId);
+        else if (msg.type === "XVD_RESUME") resumeJob(jobId);
+        else cancelJob(jobId);
         break;
       }
     }
@@ -1168,11 +919,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           : null;
 
       const jobId = ++jobSeq;
-      jobs.set(jobId, {
-        tabId: sender && sender.tab && sender.tab.id,
-        frameId: sender && sender.frameId,
-        requestId: msg.requestId,
-      });
+      const tabId = sender && sender.tab && sender.tab.id;
+      const frameId = sender && sender.frameId;
+      jobs.set(jobId, { tabId, frameId, requestId: msg.requestId });
+      // Route any 403-gated media fetch through this tab's page context.
+      setProxyTab(tabId, frameId);
 
       try {
         const url = await startGenericDownload(
@@ -1192,6 +943,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: false, error: (e && e.message) || "Error" });
       } finally {
         jobs.delete(jobId);
+        setProxyTab(null, null);
       }
     })();
 
@@ -1202,10 +954,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   (async () => {
     const jobId = ++jobSeq;
-    jobs.set(jobId, {
-      tabId: sender && sender.tab && sender.tab.id,
-      requestId: msg.requestId,
-    });
+    const tabId = sender && sender.tab && sender.tab.id;
+    const frameId = sender && sender.frameId;
+    jobs.set(jobId, { tabId, frameId, requestId: msg.requestId });
+    setProxyTab(tabId, frameId);
     try {
       // Prefer variants sniffed from X's own API (works for sensitive tweets);
       // fall back to the public syndication endpoint when nothing was cached.
@@ -1223,6 +975,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false, error: (e && e.message) || "Error" });
     } finally {
       jobs.delete(jobId);
+      setProxyTab(null, null);
     }
   })();
 

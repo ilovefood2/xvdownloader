@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>X Video Downloader — background</title>
+    <!--
+      Safari Web Extensions do not support the chrome.offscreen API, and MV3
+      service workers cannot create blob URLs or run the ffmpeg.wasm worker.
+      So the whole media pipeline lives here, in a non-persistent background
+      *page*, which has a full DOM, URL.createObjectURL, WASM, and Workers.
+    -->
+    <script type="module" src="background.js"></script>
+  </head>
+  <body></body>
+</html>

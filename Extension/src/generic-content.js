@@ -9,7 +9,6 @@
   const BUTTON_CLASS = "xvd-generic-button";
   const WRAP_CLASS = "xvd-generic-wrap";
   const EVENT_NAME = "xvd-generic-media-url";
-  const YOUTUBE_HELPER_CHANNEL = "XVD_YOUTUBE_PAGE_HELPER";
   const CACHE_ATTR = "xvdGenericMediaUrls";
   const MAX_REMEMBERED_URLS = 300; // DASH sites (Facebook) fire 100+ segment URLs
   const mediaUrlPatterns = {
@@ -66,71 +65,12 @@
   wrap.appendChild(button);
   wrap.appendChild(cancelButton);
 
-  function requestYouTubePageHelper(payload) {
-    return new Promise((resolve, reject) => {
-      const requestId = `xvd-youtube-helper-${Date.now()}-${Math.random()}`;
-      const timer = window.setTimeout(() => {
-        window.removeEventListener("message", onMessage);
-        reject(new Error("YouTube helper timed out"));
-      }, 60000);
-
-      const onMessage = (event) => {
-        if (
-          event.source !== window ||
-          event.data?.channel !== YOUTUBE_HELPER_CHANNEL ||
-          event.data?.requestId !== requestId ||
-          (event.data?.type !== "result" && event.data?.type !== "error")
-        ) {
-          return;
-        }
-
-        window.clearTimeout(timer);
-        window.removeEventListener("message", onMessage);
-        if (event.data.type === "error") {
-          reject(new Error(event.data.error || "YouTube helper failed"));
-        } else {
-          resolve(event.data);
-        }
-      };
-
-      window.addEventListener("message", onMessage);
-      window.postMessage(
-        { ...payload, channel: YOUTUBE_HELPER_CHANNEL, type: "request", requestId },
-        "*"
-      );
-    });
-  }
-
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg?.type === "XVD_YOUTUBE_HELPER_PAGE") {
-      requestYouTubePageHelper(msg)
-        .then((result) => sendResponse({ ok: true, ...result }))
-        .catch((error) =>
-          sendResponse({
-            ok: false,
-            error: (error && error.message) || "YouTube helper failed",
-          })
-        );
-      return true;
-    }
-
-    if (msg?.type === "XVD_STAGE" && msg.requestId === activeRequestId) {
-      // Authorization steps run before any byte progress exists; once a
-      // percentage shows, it owns the label.
-      if (lastProgress == null && !paused && typeof msg.text === "string") {
-        button.textContent = msg.text;
-      }
-      return false;
-    }
-
-    if (!msg || msg.type !== "XVD_PROGRESS" || msg.requestId !== activeRequestId) {
-      return false;
-    }
-    if (!msg.total) return false;
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (!msg || msg.type !== "XVD_PROGRESS" || msg.requestId !== activeRequestId) return;
+    if (!msg.total) return;
     muxing = msg.phase === "mux";
     lastProgress = Math.min(99, Math.floor((msg.done / msg.total) * 100));
     renderProgress();
-    return false;
   });
 
   function ensureButton() {
@@ -251,29 +191,26 @@
 
     // Low-priority page links first, then player config/meta/video sources last
     // so the selected URL favors the main video over preview clips.
-    for (const [raw, explicitOnly] of [...lowPrioritySnippets, ...highPrioritySnippets]) {
-      collectFromText(raw, explicitOnly);
+    for (const raw of [...lowPrioritySnippets, ...highPrioritySnippets]) {
+      collectFromText(raw);
     }
   }
 
   function collectFromNodes(nodes, snippets) {
     for (const node of nodes) {
       if (node.tagName === "SCRIPT") {
-        snippets.push([node.textContent || "", false]);
+        snippets.push(node.textContent || "");
         continue;
       }
 
       for (const attr of ["content", "src", "href", "data-src", "data-url", "data-video", "data-preview"]) {
         const value = node.getAttribute?.(attr);
-        // An href is page navigation: a link like `/playlist?list=…` must not be
-        // mistaken for an extension-less HLS endpoint, so links only count when
-        // they carry an explicit .mp4/.m3u8 extension.
-        if (value) snippets.push([value, attr === "href"]);
+        if (value) snippets.push(value);
       }
     }
   }
 
-  function collectFromText(raw, explicitOnly = false) {
+  function collectFromText(raw) {
     const text = String(raw)
       .replace(/\\u002F/g, "/")
       .replace(/\\\//g, "/")
@@ -284,11 +221,6 @@
     }
     for (const match of text.matchAll(mediaUrlPatterns.hls)) {
       rememberMediaUrl(match[0], "hls");
-    }
-    if (explicitOnly) {
-      // Still accept a relative link such as `/media/clip.mp4`.
-      if (/\.(?:mp4|m3u8)(?:[/?#]|$)/i.test(text)) rememberMediaUrl(text);
-      return;
     }
     rememberMediaUrl(text);
     collectYouTubePlayerUrls(text);
@@ -370,38 +302,16 @@
   }
 
   function getMediaUrlFromElement(video) {
-    const sources = Array.from(video.querySelectorAll("source"));
-    const candidates = [video.currentSrc, video.src, ...sources.map((source) => source.src)];
+    const candidates = [
+      video.currentSrc,
+      video.src,
+      ...Array.from(video.querySelectorAll("source")).map((source) => source.src),
+    ];
 
     return {
-      direct: bestSourceMp4(sources) || candidates.find((url) => mediaKind(url) === "mp4") || null,
+      direct: candidates.find((url) => mediaKind(url) === "mp4") || null,
       hls: candidates.find((url) => mediaKind(url) === "hls") || null,
     };
-  }
-
-  // Players like Plyr list one <source> per quality (`size="1080"`) but start on
-  // a lower default, so currentSrc isn't the best file. Pick the tallest labeled
-  // MP4 source; with no labels, defer to what the browser is playing.
-  function sourceHeight(source) {
-    for (const attr of ["size", "res", "data-res", "data-quality", "label", "title"]) {
-      const height = parseInt(source.getAttribute(attr) || "", 10);
-      if (height > 0) return height;
-    }
-    return parseInt((source.src.match(/(\d{3,4})p(?![a-z])/i) || [])[1] || "0", 10);
-  }
-
-  function bestSourceMp4(sources) {
-    let best = null;
-    let bestHeight = 0;
-    for (const source of sources) {
-      if (mediaKind(source.src) !== "mp4") continue;
-      const height = sourceHeight(source);
-      if (height > bestHeight) {
-        best = source.src;
-        bestHeight = height;
-      }
-    }
-    return best;
   }
 
   function getLatestMediaUrls(video) {
@@ -413,11 +323,6 @@
     const tiktok = getTikTokMediaUrl();
     if (tiktok) rememberMediaUrl(tiktok, "mp4");
     const elementUrls = getMediaUrlFromElement(video);
-    // A real MP4 on the hovered <video> itself is what's playing; don't let an
-    // unrelated HLS URL sniffed elsewhere on the page override it.
-    if (elementUrls.direct && !elementUrls.hls) {
-      return { direct: elementUrls.direct, hls: null };
-    }
     const hls = elementUrls.hls || mediaUrls.hls[mediaUrls.hls.length - 1] || null;
     const direct = elementUrls.direct || mediaUrls.mp4[mediaUrls.mp4.length - 1] || null;
 
@@ -836,7 +741,7 @@
     return null;
   }
 
-  function getYouTubeVideoId(video) {
+  function getYouTubeVideoId() {
     const host = window.location.hostname.toLowerCase();
     const valid = (id) => (/^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null);
 
@@ -845,26 +750,6 @@
     }
 
     if (!/(^|\.)youtube(?:-nocookie)?\.com$/.test(host)) return null;
-
-    // Shorts keeps adjacent videos preloaded in the same document. Resolve the
-    // hovered player's own permalink first so a background/preloaded Short
-    // cannot inherit the currently active page URL's id.
-    const shortRenderer = video?.closest?.("ytd-reel-video-renderer");
-    const shortHref = shortRenderer
-      ?.querySelector?.('a[href*="/shorts/"]')
-      ?.getAttribute?.("href");
-    if (shortHref) {
-      try {
-        const shortId = (
-          new URL(shortHref, window.location.href).pathname.match(
-            /\/shorts\/([a-zA-Z0-9_-]{11})/
-          ) || []
-        )[1];
-        if (shortId) return valid(shortId);
-      } catch {
-        /* fall back to the top-level URL */
-      }
-    }
 
     const v = new URLSearchParams(window.location.search).get("v");
     if (v) return valid(v);
@@ -934,7 +819,7 @@
 
   async function handleDownload(video) {
     let { direct, hls } = getLatestMediaUrls(video);
-    const youtubeVideoId = getYouTubeVideoId(video);
+    const youtubeVideoId = getYouTubeVideoId();
     let mux = null;
     let mediaTitle = null;
 
@@ -1010,7 +895,7 @@
     lastProgress = null;
     muxing = false;
     downloadCanceled = false;
-    setButtonState("busy", youtubeVideoId ? "Authorizing..." : "Fetching...");
+    setButtonState("busy", "Fetching...");
 
     try {
       const response = await chrome.runtime.sendMessage({
@@ -1035,20 +920,7 @@
       if (downloadCanceled || activeRequestId !== requestId) return;
       console.warn("[X Video Downloader generic]", error);
       activeRequestId = null;
-      const message = String((error && error.message) || error || "");
-      const needsRefresh = /extension context invalidated|receiving end does not exist|could not establish connection/i.test(
-        message
-      );
-      if (needsRefresh) {
-        showTemporaryState("Refresh page", "error", 3000);
-      } else if (message && message !== "Download failed") {
-        // Say why (e.g. "YouTube token snapshot timed out") instead of a bare
-        // "Failed", so a stall can be reported without opening DevTools.
-        const reason = message.length > 60 ? message.slice(0, 57) + "..." : message;
-        showTemporaryState(`Failed: ${reason}`, "error", 6000);
-      } else {
-        showTemporaryState("Failed", "error", 3000);
-      }
+      showTemporaryState("Failed", "error", 3000);
     }
   }
 
@@ -1149,33 +1021,17 @@
     subtree: true,
   });
 
-  // YouTube's miniplayer is a tiny frame whose every corner already holds one of
-  // its own controls (expand top-left, close top-right, play centre, time +
-  // scrubber along the bottom), leaving nowhere to overlay our button without
-  // covering something. Don't show it there — download from the full watch page.
-  function isInMiniplayer(video) {
-    return !!(
-      video &&
-      typeof video.closest === "function" &&
-      video.closest("ytd-miniplayer")
-    );
-  }
-
   function positionButton(video) {
     if (!video) return;
-    if (isInMiniplayer(video)) {
-      wrap.classList.remove("xvd-generic-visible");
-      return;
-    }
 
     const rect = video.getBoundingClientRect();
     const inset = 8;
-    const menuClearance = 56;
     const buttonWidth = wrap.offsetWidth || 120;
     const buttonHeight = wrap.offsetHeight || 36;
+    const maxLeft = Math.max(inset, window.innerWidth - buttonWidth - inset);
     const maxTop = Math.max(inset, window.innerHeight - buttonHeight - inset);
-    const top = Math.min(maxTop, Math.max(inset, rect.top + menuClearance));
-    const left = Math.max(inset, rect.left + 12);
+    const top = Math.min(maxTop, Math.max(inset, rect.top + 12));
+    const left = Math.min(maxLeft, Math.max(inset, rect.left + 12));
 
     wrap.style.top = `${top}px`;
     wrap.style.left = `${left}px`;
@@ -1183,10 +1039,6 @@
 
   function showButton(video) {
     if (!video) return;
-    if (isInMiniplayer(video)) {
-      wrap.classList.remove("xvd-generic-visible");
-      return;
-    }
 
     window.clearTimeout(hideTimer);
     activeVideo = video;

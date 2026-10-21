@@ -1,11 +1,15 @@
 /*
  * X Video Downloader — shared HLS / media pipeline (ES module).
  *
- * Used by both the offscreen document (real downloads) and the test harness
- * (test/hls-test.html). Pure of chrome messaging: pause/cancel is driven by a
- * DownloadControl, progress by an onProgress(done, total) callback. Returns
- * Blobs; the caller turns them into object URLs / downloads.
+ * Pure of chrome messaging: pause/cancel is driven by a DownloadControl,
+ * progress by an onProgress(done, total) callback. Returns Blobs; the caller
+ * turns them into downloads.
+ *
+ * Safari port: every network request goes through smartFetch (net.js), which
+ * transparently falls back to a page-context fetch when a gated CDN (e.g.
+ * YouTube) refuses the extension-origin request with a 403.
  */
+import { smartFetch } from "./net.js";
 
 export class CanceledError extends Error {
   constructor() {
@@ -95,7 +99,7 @@ function makeFetchTimed(credentials) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), ms);
     try {
-      return await fetch(url, { ...base, signal: ctrl.signal });
+      return await smartFetch(url, { ...base, signal: ctrl.signal });
     } catch (e) {
       if (e && e.name === "AbortError") throw new Error("Request timed out");
       throw e;
@@ -298,45 +302,6 @@ async function runWorkers(count, control, task) {
   if (failed) throw failed.reason;
 }
 
-// Short sleep to space out segment retries. Cancellation is enforced by the
-// control.gate() call that follows each backoff, so a plain timer suffices.
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Transient = the connection dropped or the CDN asked us to slow down. Anti-
-// hotlink CDNs answer parallel/rapid segment requests with a TCP reset
-// (net::ERR_CONNECTION_RESET, surfaced to fetch as a "Failed to fetch"
-// TypeError) rather than a 4xx. Range downloads can also see 429/5xx during
-// bursts. Those are worth backing off and retrying; genuine 403/404 is not.
-function isTransientFetchError(e) {
-  const m = String((e && e.message) || e || "");
-  return /failed to fetch|networkerror|network error|load failed|connection|reset|timed out|HTTP (?:408|425|429|5\d\d)\b/i.test(m);
-}
-
-// Fetch one segment, retrying transient connection resets with exponential
-// backoff + jitter. A real HTTP error (or cancellation) fails fast.
-async function fetchSegment(fetchTimed, url, control, timeout = 30000, attempts = 5) {
-  let lastErr;
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    if (attempt > 0) {
-      const backoff = Math.min(5000, 400 * 2 ** (attempt - 1));
-      await sleep(backoff + Math.floor(Math.random() * 300));
-    }
-    await control.gate();
-    try {
-      const r = await fetchTimed(url, timeout);
-      if (!r.ok) throw new Error("Segment HTTP " + r.status);
-      return r;
-    } catch (e) {
-      if (control.canceled) throw e;
-      lastErr = e;
-      if (!isTransientFetchError(e)) throw e;
-    }
-  }
-  throw lastErr;
-}
-
 /** Unencrypted fragmented-MP4: byte-concatenate init + segments → MP4. */
 async function assembleConcat(mapUrl, segments, ctx) {
   const { fetchTimed, control, onProgress } = ctx;
@@ -346,7 +311,8 @@ async function assembleConcat(mapUrl, segments, ctx) {
   if (onProgress) onProgress(0, urls.length);
   console.log("[XVD] HLS: downloading", urls.length, "segments");
   await runWorkers(urls.length, control, async (i) => {
-    const r = await fetchSegment(fetchTimed, urls[i], control, 30000);
+    const r = await fetchTimed(urls[i], 30000);
+    if (!r.ok) throw new Error("Segment HTTP " + r.status);
     parts[i] = await r.blob();
     done++;
     if (onProgress && (done % 10 === 0 || done === urls.length)) {
@@ -415,7 +381,8 @@ async function assembleTsConcat(media, ctx, reason) {
 
   await runWorkers(total, control, async (i) => {
     const segment = plan.segments[i];
-    const r = await fetchSegment(fetchTimed, segment.url, control, 30000);
+    const r = await fetchTimed(segment.url, 30000);
+    if (!r.ok) throw new Error("Segment HTTP " + r.status);
 
     if (segment.keyUrl) {
       const cryptoKey = await getAesKey(fetchTimed, segment.keyUrl, keyCache);
@@ -462,7 +429,8 @@ async function assembleWithFfmpeg(media, ctx) {
   if (onProgress) onProgress(0, total);
   console.log("[XVD] ffmpeg: downloading", total, "files");
   await runWorkers(total, control, async (i) => {
-    const r = await fetchSegment(fetchTimed, downloads[i].url, control, 30000);
+    const r = await fetchTimed(downloads[i].url, 30000);
+    if (!r.ok) throw new Error("Segment HTTP " + r.status);
     await ff.writeFile(downloads[i].name, new Uint8Array(await r.arrayBuffer()));
     done++;
     if (onProgress && (done % 10 === 0 || done === total)) onProgress(done, total);
@@ -538,13 +506,10 @@ async function readBlobWithProgress(response, { control, onProgress } = {}) {
 }
 
 /** Download a direct progressive media file (e.g. an MP4). */
-export async function downloadDirect(url, { credentials, control, onProgress, preferSingleGet } = {}) {
+export async function downloadDirect(url, { credentials, control, onProgress } = {}) {
   // Concurrent Range chunks when supported (fast, throttle-resistant), with an
   // automatic single-GET fallback for servers that don't honour Range.
-  return {
-    blob: await downloadStream(url, { credentials, control, onProgress, preferSingleGet }),
-    ext: "mp4",
-  };
+  return { blob: await downloadStream(url, { credentials, control, onProgress }), ext: "mp4" };
 }
 
 const STREAM_CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB, matches yt-dlp's default
@@ -558,7 +523,7 @@ async function probeStreamSize(url, credentials) {
   const timer = setTimeout(() => ctrl.abort(), 20000);
   let response;
   try {
-    response = await fetch(url, {
+    response = await smartFetch(url, {
       credentials: credentials || "omit",
       cache: "no-store",
       headers: { Range: "bytes=0-1" },
@@ -579,45 +544,25 @@ async function probeStreamSize(url, credentials) {
   return { total, contentType, chunkable: response.status === 206 && total > 0 };
 }
 
-// Download a single Range chunk into a Uint8Array, with per-chunk retries.
-async function fetchRangeChunk(url, credentials, start, end, control, attempts = 4) {
-  const expected = end - start + 1;
-  let lastErr;
-
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    if (attempt > 0) {
-      const backoff = Math.min(5000, 500 * 2 ** (attempt - 1));
-      await sleep(backoff + Math.floor(Math.random() * 300));
-    }
-    await control?.gate();
-
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 60000);
-    try {
-      const response = await fetch(url, {
-        credentials: credentials || "omit",
-        cache: "no-store",
-        headers: { Range: `bytes=${start}-${end}` },
-        signal: ctrl.signal,
-      });
-      if (!response.ok || response.status !== 206) {
-        throw new Error("Chunk HTTP " + response.status);
-      }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.length !== expected) {
-        throw new Error(`Chunk short: ${bytes.length}/${expected}`);
-      }
-      return bytes;
-    } catch (e) {
-      if (control?.canceled) throw e;
-      lastErr = e && e.name === "AbortError" ? new Error("Chunk timed out") : e;
-      if (!isTransientFetchError(lastErr)) throw lastErr;
-    } finally {
-      clearTimeout(timer);
-    }
+// Download a single Range chunk into a Uint8Array, with a per-chunk timeout.
+async function fetchRangeChunk(url, credentials, start, end) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  try {
+    const response = await smartFetch(url, {
+      credentials: credentials || "omit",
+      cache: "no-store",
+      headers: { Range: `bytes=${start}-${end}` },
+      signal: ctrl.signal,
+    });
+    if (!response.ok) throw new Error("Chunk HTTP " + response.status);
+    return new Uint8Array(await response.arrayBuffer());
+  } catch (e) {
+    if (e && e.name === "AbortError") throw new Error("Chunk timed out");
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-
-  throw lastErr || new Error("Chunk failed");
 }
 
 /**
@@ -642,7 +587,7 @@ async function downloadStreamChunked(url, total, { credentials, control, onProgr
       if (control) await control.gate();
       const i = next++;
       const [start, end] = ranges[i];
-      const bytes = await fetchRangeChunk(url, credentials, start, end, control);
+      const bytes = await fetchRangeChunk(url, credentials, start, end);
       parts[i] = bytes;
       done += bytes.length;
       if (onProgress) onProgress(Math.min(done, total), total);

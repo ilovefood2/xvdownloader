@@ -1,0 +1,65 @@
+/*
+ * Branded styling for the container-app window.
+ *
+ * This targets the exact markup the safari-web-extension-converter generates in
+ * Base.lproj/Main.html (img, p.platform-ios, p.platform-mac.state-on/off/unknown,
+ * button.open-preferences). The native ViewControllers toggle those classes and
+ * call show(), so ONLY the styling is overridden here — Main.html and Script.js
+ * are left as the converter generated them, to keep the native wiring intact.
+ */
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1c1c1e;
+  --muted: #6b6b70;
+  --accent: #1d9bf0; /* X blue */
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #1c1c1e; --fg: #f5f5f7; --muted: #9a9aa0; }
+}
+
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+}
+
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 32px;
+  gap: 14px;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+img { border-radius: 22%; }
+
+/* The converter shows/hides these per platform + enabled state via JS classes. */
+body:not(.platform-mac) .platform-mac { display: none; }
+body:not(.platform-ios) .platform-ios { display: none; }
+.platform-mac.state-on,
+.platform-mac.state-off,
+.platform-mac.state-unknown { display: none; }
+body.state-on .platform-mac.state-on { display: block; }
+body.state-off .platform-mac.state-off { display: block; }
+body.state-unknown .platform-mac.state-unknown { display: block; }
+
+p { max-width: 420px; margin: 0; color: var(--muted); }
+
+button.open-preferences {
+  margin-top: 8px;
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 16px;
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  cursor: pointer;
+}
+button.open-preferences:hover { filter: brightness(1.05); }
